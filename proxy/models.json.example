@@ -1,0 +1,66 @@
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "http://host.containers.internal:8317/v1"
+    },
+    "anthropic": {
+      "baseUrl": "http://host.containers.internal:8317/anthropic_passthrough"
+    },
+    "myrouter": {
+      "baseUrl": "http://host.containers.internal:8317/v1",
+      "api": "openai-completions",
+      "apiKey": "$OPENROUTER_API_KEY",
+      "models": [
+        {
+          "id": "myrouter/z-ai/glm-5.3",
+          "name": "GLM 5.3 (OpenRouter)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "cost": {
+            "input": 0.0699,
+            "output": 1.4,
+            "cacheRead": 0.0689,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": true
+          },
+          "samplingParams": {
+            "frequency_penalty": 0,
+            "presence_penalty": 0
+          }
+        },
+        {
+          "id": "myrouter/deepseek/deepseek-v4.1-flash-1017",
+          "name": "DeepSeek V4.1 Flash (OpenRouter)",
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0.15,
+            "output": 0.6,
+            "cacheRead": 0.003,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "supportsDeveloperRole": false
+          }
+        }
+      ]
+    }
+  }
+}

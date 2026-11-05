@@ -1,0 +1,29 @@
+# Example systemd user unit for a host-side MCP service.
+#
+# Credential-bearing MCP servers run on the host (like the LLM proxy): the
+# jail connects by URL and never sees the real API keys. Servers that need
+# to read the project files cannot be hoisted this way - keep those as
+# stdio entries in the jail's mcp.json.
+#
+# Copy to ~/.config/systemd/user/, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now mcp-atlassian
+#
+# Starts on login (WantedBy=default.target); stops at logout unless you run
+# `loginctl enable-linger $USER`.
+
+[Unit]
+Description=pi-jail MCP gateway: mcp-atlassian (Jira credentials stay on the host)
+
+[Service]
+# 127.0.0.1 is mandatory: the default bind is 0.0.0.0, which would expose
+# your Jira tools to the network. The jail reaches this via the pasta
+# --map-host-loopback mapping (host.containers.internal).
+ExecStart=/usr/bin/uvx mcp-atlassian --transport streamable-http --host 127.0.0.1 --port 8321
+EnvironmentFile=%h/.config/pi-jail/mcp.env
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

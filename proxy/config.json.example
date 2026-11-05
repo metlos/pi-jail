@@ -1,0 +1,62 @@
+{
+  "source_of_truth": "config.json",
+  "providers": {
+    "myrouter": {
+      "custom_provider_config": {
+        "base_provider_type": "openai"
+      },
+      "network_config": {
+        "base_url": "https://openrouter.ai/api"
+      },
+      "keys": [
+        {
+          "id": "myrouter-key",
+          "name": "myrouter-key",
+          "value": "env.OPENROUTER_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ]
+    },
+    "anthropic": {
+      "network_config": {
+        "base_url": "https://openrouter.ai/api"
+      },
+      "keys": [
+        {
+          "id": "anthropic-key",
+          "name": "anthropic-key",
+          "value": "env.OPENROUTER_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ]
+    }
+  },
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-pi-jail",
+        "name": "pi-jail",
+        "value": "env.BIFROST_VK",
+        "provider_configs": [
+          {
+            "provider": "myrouter",
+            "allowed_models": ["*"],
+            "key_ids": ["*"],
+            "weight": 1
+          },
+          {
+            "provider": "anthropic",
+            "allowed_models": ["*"],
+            "key_ids": ["*"],
+            "weight": 1
+          }
+        ]
+      }
+    ]
+  },
+  "client": {
+    "enforce_auth_on_inference": true
+  }
+}

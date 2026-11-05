@@ -1,0 +1,19 @@
+{
+  "defaultModel": "myrouter/z-ai/glm-5.3",
+  "defaultProvider": "myrouter",
+  "defaultThinkingLevel": "max",
+  "lastChangelogVersion": "1.5.0",
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "theme": "dark",
+  "hideThinkingBlock": true,
+  "tuiMode": "regular",
+  "extensions": [],
+  "defaultTools": [
+    "+codemode"
+  ],
+  "markdown": {
+    "mermaid": "streaming"
+  }
+}

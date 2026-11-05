@@ -1,0 +1,180 @@
+#!/bin/sh
+# pctl - pi-jail project controller
+#
+# Layout (adopted in place, repo root = PROJECT_DIR):
+#   shared/home     jail home, mounted at /home by ./pi
+#   shared/project  merged into workspaces via symlinks
+#   ws/<name>       colocated jj workspaces
+#
+# Needs jj >= 0.46 (colocated workspaces, jj workspace remove).
+set -eu
+
+usage() {
+	echo "usage: pctl init                    adopt this jj repo into the jail layout" >&2
+	echo "       pctl new <name>              create workspace ws/<name> and merge shared/project" >&2
+	echo "       pctl merge <name>            merge new shared/project entries into ws/<name>" >&2
+	echo "       pctl drop [--force] <name>   remove workspace (refuses on unlanded working copy)" >&2
+	echo "       pctl uninit [--force]        remove workspaces, restore full checkout at repo root" >&2
+	exit 2
+}
+
+die() {
+	echo "pctl: $*" >&2
+	exit 1
+}
+
+at_repo_root() {
+	[ -d .jj ] || die "not a jj repo root; run from PROJECT_DIR"
+}
+
+# Symlink shared/project into a workspace; existing entries win. Targets stay
+# relative so they resolve on the host and inside the jail (the whole project
+# is mounted at /work there, so paths resolve exactly as on the host).
+merge_shared() {
+	ws="ws/$1"
+	[ -d "$ws" ] || die "no such workspace: $ws"
+	[ -d shared/project ] || return 0
+	for entry in shared/project/* shared/project/.[!.]*; do
+		[ -e "$entry" ] || continue
+		link="$ws/$(basename "$entry")"
+		[ -e "$link" ] || ln -s "../../$entry" "$link"
+	done
+}
+
+# Unlanded user work in a workspace's working copy; symlink-only diffs are
+# tolerated - those are pctl's own merged entries from shared/project.
+ws_dirty() {
+	(cd "ws/$1" && jj diff -r @ --types) | grep -qvE '^[L-]{2} '
+}
+
+cmd_init() {
+	at_repo_root
+	changed=0
+
+	# colocate so workspaces get real git worktrees (git tooling works in ws/*)
+	if [ ! -d .git ]; then
+		jj git colocation enable
+		changed=1
+	fi
+
+	mkdir -p shared/home shared/project ws
+
+	# bare-ish root: project files stay in commits and workspaces, not on disk
+	if [ "$(jj sparse list)" != "ws" ]; then
+		echo "note: project files are dematerialized from the repo root"
+		jj sparse set --clear --add ws
+		changed=1
+	fi
+
+	# hide layout dirs from colocated git; info/exclude is local-only
+	for pat in ws/ shared/; do
+		if ! grep -qx "$pat" .git/info/exclude 2>/dev/null; then
+			echo "$pat" >>.git/info/exclude
+			changed=1
+		fi
+	done
+
+	[ "$changed" -eq 1 ] || echo "already initialized"
+}
+
+cmd_new() {
+	[ $# -eq 1 ] || usage
+	name=$1
+	case $name in
+	. | .. | */*) die "bad workspace name: $name" ;;
+	esac
+	at_repo_root
+	[ -d .git ] || die "not initialized; run pctl init first"
+
+	# -r @: without it the new working copy lands on @'s parents (a sibling
+	# of the root's current state), not on the current state itself
+	jj workspace add --colocate -r @ "ws/$name"
+
+	# workspaces inherit the root's sparse pattern (ws-only); reset to full
+	(cd "ws/$name" && jj sparse set --clear --add .)
+
+	merge_shared "$name"
+}
+
+cmd_merge() {
+	[ $# -eq 1 ] || usage
+	at_repo_root
+	merge_shared "$1"
+}
+
+cmd_drop() {
+	force=0
+	if [ "${1:-}" = "--force" ]; then
+		force=1
+		shift
+	fi
+	[ $# -eq 1 ] || usage
+	name=$1
+	at_repo_root
+
+	# jj workspace remove snapshots the working copy first, so nothing is
+	# lost even with --force.
+	if [ "$force" -eq 0 ] && ws_dirty "$name"; then
+		die "ws/$name has unlanded work in its working copy; use --force to drop anyway"
+	fi
+
+	jj workspace remove "$name"
+}
+
+# Reverse of init: remove the workspaces, restore a plain full checkout at
+# the repo root. shared/ is left behind - the jail home may hold pi state
+# worth keeping; rm -rf shared once done with it.
+cmd_uninit() {
+	force=0
+	if [ "${1:-}" = "--force" ]; then
+		force=1
+		shift
+	fi
+	[ $# -eq 0 ] || usage
+	at_repo_root
+	[ -d ws ] || [ -d shared ] || die "not a pctl-adopted repo"
+
+	for d in ws/*; do
+		[ -d "$d" ] || continue
+		name=${d#ws/}
+		if [ "$force" -eq 0 ] && ws_dirty "$name"; then
+			die "ws/$name has unlanded work in its working copy; use --force to uninit anyway"
+		fi
+	done
+
+	# advance the root to the workspaces' landed work so the restored
+	# checkout contains it (merged when heads diverged); also keeps the
+	# workspaces' snapshot commits alive through the removal below
+	if jj log -r 'heads(@::) & ~@' --no-graph -T 'commit_id' | grep -q .; then
+		jj new 'heads(@::)'
+	fi
+
+	for d in ws/*; do
+		[ -d "$d" ] || continue
+		jj workspace remove "${d#ws/}"
+	done
+	rmdir ws 2>/dev/null || true
+
+	# rematerialize the project files at the repo root
+	jj sparse set --clear --add .
+
+	# unhide layout dirs from colocated git; info/exclude is local-only
+	for pat in ws/ shared/; do
+		[ -f .git/info/exclude ] || continue
+		grep -vx "$pat" .git/info/exclude >.git/info/exclude.tmp || true
+		mv .git/info/exclude.tmp .git/info/exclude
+	done
+
+	if [ -d shared ]; then
+		echo "note: shared/ left behind (jail home, shared entries); rm -rf it when you no longer need it"
+	fi
+}
+
+case "${1:-}" in
+init) shift; [ $# -eq 0 ] || usage; cmd_init ;;
+uninit) shift; cmd_uninit "$@" ;;
+new) shift; cmd_new "$@" ;;
+merge) shift; cmd_merge "$@" ;;
+drop) shift; cmd_drop "$@" ;;
+*) usage ;;
+esac

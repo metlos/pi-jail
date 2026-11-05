@@ -1,0 +1,33 @@
+# systemd user unit for the pi-jail LLM gateway (Bifrost).
+#
+# Copy to ~/.config/systemd/user/bifrost.service, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now bifrost
+#
+# Starts on login (WantedBy=default.target); stops at logout unless you run
+# `loginctl enable-linger $USER`. First start takes ~20s (SQLite store
+# migrations); until then the jail cannot reach the gateway.
+#
+# The gateway reads config.json from its app dir, so the person config is
+# copied into the state dir on every start - edit ~/.config/pi-jail/config.json
+# and restart the unit to apply changes.
+
+[Unit]
+Description=pi-jail LLM gateway (Bifrost; keeps real API keys off the jail)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/pi-jail/bifrost
+ExecStartPre=/usr/bin/cp -f %h/.config/pi-jail/config.json %h/.local/state/pi-jail/bifrost/config.json
+ExecStart=/usr/bin/podman run --rm --name pi-jail-bifrost \
+  --user 0:0 \
+  -p 127.0.0.1:8317:8080 \
+  --env-file %h/.config/pi-jail/bifrost.env \
+  -e BIFROST_HOST=0.0.0.0 \
+  -v %h/.local/state/pi-jail/bifrost:/app/data:Z \
+  docker.io/maximhq/bifrost:latest
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
