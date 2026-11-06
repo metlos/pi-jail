@@ -43,7 +43,8 @@ RUN pi install npm:@tintinweb/pi-subagents \
   && pi install npm:@tintinweb/pi-tasks \
   && pi install git:github.com/DietrichGebert/ponytail \
   && pi install npm:@evreke/pi-grill-deck \
-  && pi install npm:pi-btw
+  && pi install npm:pi-btw \
+  && pi install npm:@gotgenes/pi-permission-system
 
 COPY ./scripts/entrypoint.sh /usr/bin
 
