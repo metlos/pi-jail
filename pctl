@@ -3,7 +3,7 @@
 #
 # Layout (adopted in place, repo root = PROJECT_DIR):
 #   shared/home     jail home, mounted at /home by ./pi
-#   shared/project  merged into workspaces via symlinks
+#   shared/project  filled into workspaces via symlinks
 #   ws/<name>       colocated jj workspaces
 #
 # Needs jj >= 0.46 (colocated workspaces, jj workspace remove).
@@ -11,8 +11,8 @@ set -eu
 
 usage() {
 	echo "usage: pctl init                    adopt this jj repo into the jail layout" >&2
-	echo "       pctl new <name>              create workspace ws/<name> and merge shared/project" >&2
-	echo "       pctl merge <name>            merge new shared/project entries into ws/<name>" >&2
+	echo "       pctl new <name>              create workspace ws/<name> and fill it from shared/project" >&2
+	echo "       pctl fill <name>            fill ws/<name> with new shared/project entries" >&2
 	echo "       pctl drop [--force] <name>   remove workspace (refuses on unlanded working copy)" >&2
 	echo "       pctl uninit [--force]        remove workspaces, restore full checkout at repo root" >&2
 	exit 2
@@ -30,7 +30,7 @@ at_repo_root() {
 # Symlink shared/project into a workspace; existing entries win. Targets stay
 # relative so they resolve on the host and inside the jail (the whole project
 # is mounted at /work there, so paths resolve exactly as on the host).
-merge_shared() {
+fill_shared() {
 	ws="ws/$1"
 	[ -d "$ws" ] || die "no such workspace: $ws"
 	[ -d shared/project ] || return 0
@@ -42,7 +42,7 @@ merge_shared() {
 }
 
 # Unlanded user work in a workspace's working copy; symlink-only diffs are
-# tolerated - those are pctl's own merged entries from shared/project.
+# tolerated - those are pctl's own filled entries from shared/project.
 ws_dirty() {
 	(cd "ws/$1" && jj diff -r @ --types) | grep -qvE '^[L-]{2} '
 }
@@ -93,13 +93,13 @@ cmd_new() {
 	# workspaces inherit the root's sparse pattern (ws-only); reset to full
 	(cd "ws/$name" && jj sparse set --clear --add .)
 
-	merge_shared "$name"
+	fill_shared "$name"
 }
 
-cmd_merge() {
+cmd_fill() {
 	[ $# -eq 1 ] || usage
 	at_repo_root
-	merge_shared "$1"
+	fill_shared "$1"
 }
 
 cmd_drop() {
@@ -174,7 +174,7 @@ case "${1:-}" in
 init) shift; [ $# -eq 0 ] || usage; cmd_init ;;
 uninit) shift; cmd_uninit "$@" ;;
 new) shift; cmd_new "$@" ;;
-merge) shift; cmd_merge "$@" ;;
+fill) shift; cmd_fill "$@" ;;
 drop) shift; cmd_drop "$@" ;;
 *) usage ;;
 esac

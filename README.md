@@ -29,7 +29,7 @@ workspaces, not on disk at the root.
 ```
 <PROJECT_DIR>           # jj repo (colocated), adopted in place
 |- shared/home          # jail home: seeded pi state, persists across runs
-|- shared/project       # merged into workspaces by symlink (node_modules, ...)
+|- shared/project       # filled into workspaces by symlink (node_modules, ...)
 |- ws/<name>            # colocated jj workspaces
 ```
 
@@ -42,7 +42,7 @@ pi mytask
 
 - `pctl new <name>` - create workspace `ws/<name>` at the root's current state and symlink `shared/project` entries into
   it
-- `pctl merge <name>` - symlink new `shared/project` entries into a workspace
+- `pctl fill <name>` - symlink new `shared/project` entries into a workspace
 - `pctl drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
   overrides; the working copy is snapshotted into a commit before removal either way)
 - `pctl uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
