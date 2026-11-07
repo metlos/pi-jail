@@ -17,6 +17,9 @@
     "external_directory": {
       "*": "allow"
     },
+    "bash": {
+      "*": "allow"
+    },
     "skill": {
       "*": "allow"
     }
