@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# pctl - pi-jail project controller
+# pj - pi-jail controller: adopts the repo layout and runs the agent jail
 #
 # Layout (adopted in place, repo root = PROJECT_DIR):
-#   shared/home     jail home, mounted at /home by ./pi
+#   shared/home     jail home, mounted at /home by pj open/debug
 #   shared/project  filled into workspaces via symlinks
 #   ws/<name>       colocated jj workspaces
 #   pi-jail.conf    untracked extra-mount config, [<ws>] sections of -v specs
@@ -11,21 +11,23 @@
 set -euo pipefail
 
 usage() {
-	echo "usage: pctl init                    adopt this jj repo into the jail layout" >&2
-	echo "       pctl new <name>              create workspace ws/<name> and fill it from shared/project" >&2
-	echo "       pctl fill <name>            fill ws/<name> with new shared/project entries" >&2
-	echo "       pctl drop [--force] <name>   remove workspace (refuses on unlanded working copy)" >&2
-	echo "       pctl config <name>           print the workspace's extra mounts (pi-jail.conf)" >&2
-	echo "       pctl config set <name> -v <src>:<dst>[:opts]..." >&2
+	echo "usage: pj init                    adopt this jj repo into the jail layout" >&2
+	echo "       pj new <ws/name>            create workspace ws/<name> and fill it from shared/project" >&2
+	echo "       pj fill <ws/name>           fill ws/<name> with new shared/project entries" >&2
+	echo "       pj drop [--force] <ws/name>  remove workspace (refuses on unlanded working copy)" >&2
+	echo "       pj config <ws/name>         print the workspace's extra mounts (pi-jail.conf)" >&2
+	echo "       pj config set <ws/name> -v <src>:<dst>[:opts]..." >&2
 	echo "                                    replace the workspace's extra mounts" >&2
-	echo "       pctl config add <name> -v <src>:<dst>[:opts]..." >&2
+	echo "       pj config add <ws/name> -v <src>:<dst>[:opts]..." >&2
 	echo "                                    add extra mounts to the workspace" >&2
-	echo "       pctl uninit [--force]        remove workspaces, restore full checkout at repo root" >&2
+	echo "       pj uninit [--force]         remove workspaces, restore full checkout at repo root" >&2
+	echo "       pj open <ws/name> [args...] run the pi coding agent in the workspace's jail" >&2
+	echo "       pj debug <ws/name>          start a shell in the workspace's jail" >&2
 	exit 2
 }
 
 die() {
-	echo "pctl: $*" >&2
+	echo "pj: $*" >&2
 	exit 1
 }
 
@@ -33,20 +35,25 @@ at_repo_root() {
 	[ -d .jj ] || die "not a jj repo root; run from PROJECT_DIR"
 }
 
-# name is valid if it can never be mistaken for a section header line
-check_name() {
-	case $1 in
-	. | .. | */* | \[* | *\]*) die "bad workspace name: $1" ;;
+# Accept both "name" and "ws/name" (shell completion offers the latter) and
+# echo the bare name. A name is valid only if it can never be mistaken for a
+# pi-jail.conf section header line.
+ws_name() { # ws_name ARG
+	local name=${1#ws/}
+	case $name in
+	"" | . | .. | \[* | *\]* | */*) die "bad workspace: $1" ;;
 	esac
+	echo "$name"
 }
 
 # Symlink shared/project into a workspace; existing entries win. Targets stay
 # relative so they resolve on the host and inside the jail (the whole project
 # is mounted at /work there, so paths resolve exactly as on the host).
 fill_shared() {
-	ws="ws/$1"
+	local ws="ws/$1"
 	[ -d "$ws" ] || die "no such workspace: $ws"
 	[ -d shared/project ] || return 0
+	local entry link
 	for entry in shared/project/* shared/project/.[!.]*; do
 		[ -e "$entry" ] || continue
 		link="$ws/$(basename "$entry")"
@@ -55,7 +62,7 @@ fill_shared() {
 }
 
 # Unlanded user work in a workspace's working copy; symlink-only diffs are
-# tolerated - those are pctl's own filled entries from shared/project.
+# tolerated - those are pj's own filled entries from shared/project.
 ws_dirty() {
 	(cd "ws/$1" && jj diff -r @ --types) | grep -qvE '^[L-]{2} '
 }
@@ -159,10 +166,10 @@ cmd_init() {
 
 cmd_new() {
 	[ $# -eq 1 ] || usage
-	name=$1
-	check_name "$name"
+	local name
+	name=$(ws_name "$1")
 	at_repo_root
-	[ -d .git ] || die "not initialized; run pctl init first"
+	[ -d .git ] || die "not initialized; run pj init first"
 
 	# @ is a real base only while it holds pre-adoption work or a
 	# description. The bare root's @ is a permanently empty placeholder
@@ -187,17 +194,18 @@ cmd_new() {
 cmd_fill() {
 	[ $# -eq 1 ] || usage
 	at_repo_root
-	fill_shared "$1"
+	fill_shared "$(ws_name "$1")"
 }
 
 cmd_drop() {
-	force=0
+	local force=0
 	if [ "${1:-}" = "--force" ]; then
 		force=1
 		shift
 	fi
 	[ $# -eq 1 ] || usage
-	name=$1
+	local name
+	name=$(ws_name "$1")
 	at_repo_root
 
 	# jj workspace remove snapshots the working copy first, so nothing is
@@ -208,7 +216,7 @@ cmd_drop() {
 
 	jj workspace remove "$name"
 
-	# extra-mount config belongs to the workspace: a later pctl new with the
+	# extra-mount config belongs to the workspace: a later pj new with the
 	# same name should not silently resurrect the old mounts
 	write_section "$name"
 }
@@ -222,12 +230,13 @@ cmd_config() {
 		mode=print
 	fi
 	[ $# -ge 1 ] || usage
-	name=$1
+	name=$(ws_name "$1")
 	shift
 	at_repo_root
 
 	if [ "$mode" = print ]; then
 		[ $# -eq 0 ] || usage
+		local lines
 		lines=$(section_lines "$name")
 		[ -n "$lines" ] || die "no config for workspace: $name"
 		printf '%s\n' "$lines"
@@ -249,7 +258,6 @@ cmd_config() {
 	done
 	[ $# -eq 0 ] || usage
 	[ ${#specs[@]} -gt 0 ] || usage
-	check_name "$name"
 	check_specs "${specs[@]}"
 
 	if [ "$mode" = add ]; then # existing lines first, then the new ones
@@ -264,15 +272,16 @@ cmd_config() {
 # the repo root. shared/ is left behind - the jail home may hold pi state
 # worth keeping; rm -rf shared once done with it.
 cmd_uninit() {
-	force=0
+	local force=0
 	if [ "${1:-}" = "--force" ]; then
 		force=1
 		shift
 	fi
 	[ $# -eq 0 ] || usage
 	at_repo_root
-	[ -d ws ] || [ -d shared ] || die "not a pctl-adopted repo"
+	[ -d ws ] || [ -d shared ] || die "not an adopted repo"
 
+	local d name
 	for d in ws/*; do
 		[ -d "$d" ] || continue
 		name=${d#ws/}
@@ -312,6 +321,136 @@ cmd_uninit() {
 	fi
 }
 
+cmd_open() {
+	local name
+	name=$(ws_name "$1")
+	shift
+	run_jail "$name" pi "$@"
+}
+
+cmd_debug() {
+	run_jail "$(ws_name "$1")" bash
+}
+
+# Jail runner: NAME is the bare workspace name, the rest is the command line.
+run_jail() { # run_jail NAME CMD [ARGS...]
+	local name=$1
+	shift
+
+	# jail config: lives outside the image and the project mount, injected here
+	# at run time (models.json mounted over the seeded stub, settings.json copied)
+	local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/pi-jail"
+	local f
+	for f in jail.env models.json settings.json mcp.json; do
+		[ -f "$cfg/$f" ] || {
+			echo "pj: missing $cfg/$f - see the LLM proxy section in the pi-jail README" >&2
+			exit 1
+		}
+	done
+
+	# fail fast instead of letting podman auto-create missing bind sources as
+	# root-owned junk on the host
+	local d
+	for d in .jj/repo .git "ws/$name" shared/project; do
+		[ -d "$d" ] || {
+			echo "pj: missing $PWD/$d - run from an initialized project root (pj init, pj new $name)" >&2
+			exit 1
+		}
+	done
+
+	# extra mounts for this workspace: pi-jail.conf [<name>] section at the
+	# repo root, one podman -v spec per line. Appended after the fixed mounts
+	# below, so they can shadow them. Validated here because hand-edits
+	# bypass pj config; a missing src would otherwise make podman auto-create
+	# root-owned junk on the host. The conf stays outside the jail.
+	declare -a extra_vols=()
+	if [ -f pi-jail.conf ]; then
+		local in_section=0 line
+		while IFS= read -r line || [ -n "$line" ]; do
+			line=${line%$'\r'}
+			case $line in
+			"[$name]") in_section=1 ;;
+			\[*) in_section=0 ;;
+			'#'*) ;;
+			'') ;;
+			*)
+				if [ "$in_section" -eq 1 ]; then
+					local src=${line%%:*}
+					[ -e "$src" ] || {
+						echo "pj: pi-jail.conf [$name]: no such host path: $src" >&2
+						exit 1
+					}
+					extra_vols+=("-v" "$line")
+				fi
+				;;
+			esac
+		done <pi-jail.conf
+	fi
+
+	# host VCS user config, read-only: the jail home is per-project, so without
+	# this jj/git run unconfigured inside (no identity, no aliases, no ignores).
+	# The whole config dirs, not single files, so includes/ inside them work.
+	# Includes pointing elsewhere stay broken (git: silently ignored; jj: hard
+	# error) - mount those dirs via pi-jail.conf if needed. Signing keys stay
+	# out: shadow with repo-local config (git commit.gpgsign, jj signing.behavior)
+	# and sign on the host when merging to main.
+	declare -a vcs_vols=()
+	local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+	local spec
+	for spec in "$xdg/jj:/home/.config/jj" "$HOME/.gitconfig:/home/.gitconfig" "$xdg/git:/home/.config/git"; do
+		if [ -e "${spec%%:*}" ]; then vcs_vols+=("-v" "$spec:ro,z"); fi
+	done
+
+	# settings are seeded per project (first run only): pi writes them inside the
+	# jail (defaultModel, theme), so changes stay in this project instead of
+	# mutating the person-global config
+	mkdir -p "$PWD/shared/home/.pi/agent"
+	cp -n "$cfg/settings.json" "$PWD/shared/home/.pi/agent/settings.json"
+
+	# announce the extra mounts: the jail boundary differs per config, keep it
+	# visible instead of silently behaving differently per repo
+	if [ ${#extra_vols[@]} -gt 0 ]; then
+		local dsts=" ${extra_vols[@]}"
+		echo "opening jail for workspace $name (extra mounts:${dsts// -v / })"
+	else
+		echo "opening jail for workspace $name"
+	fi
+
+	# keep-id: rootless podman must map the host uid to itself (plain --user maps
+	# it to a subuid, which owns nothing on the host). :z relabels the mounts for
+	# container access under SELinux enforcing; everything else stays protected.
+	#
+	# Selective mounts: the jail gets only this workspace's working copy, the
+	# repo data it must write to commit (.jj/repo, .git - one repository shared
+	# by all workspaces, so their landed commits are visible too), and the shared
+	# entries. Every reference in between (the .jj/repo and .git pointer files,
+	# the ../../shared/project symlinks) is relative and resolves under this
+	# mirrored /work layout exactly like on the host; other workspaces' working
+	# copies and the repo root stay invisible. Jail boundary = workspace + repo
+	# (+ the extra mounts above).
+	#
+	# The LLM proxy binds host loopback, which rootless podman blocks by default
+	# (host.containers.internal points at the host's real address, not loopback),
+	# so map loopback to 169.254.1.3 and repoint the name there. Side effect:
+	# all host loopback services become reachable from the jail.
+	podman run --rm -it \
+		--userns=keep-id \
+		--network=pasta:--map-host-loopback,169.254.1.3 \
+		--add-host host.containers.internal:169.254.1.3 \
+		--env-file "$cfg/jail.env" \
+		-v "$cfg/models.json:/home/.pi/agent/models.json:ro,z" \
+		-v "$cfg/mcp.json:/home/.pi/agent/mcp.json:ro,z" \
+		"${vcs_vols[@]}" \
+		-v "$PWD/ws/$name:/work/ws/$name:z" \
+		-v "$PWD/.jj/repo:/work/.jj/repo:z" \
+		-v "$PWD/.git:/work/.git:z" \
+		-v "$PWD/shared/project:/work/shared/project:z" \
+		-v "$PWD/shared/home:/home:z" \
+		"${extra_vols[@]}" \
+		--workdir "/work/ws/$name" \
+		pi-jail:latest "$@"
+}
+
 case "${1:-}" in
 init) shift; [ $# -eq 0 ] || usage; cmd_init ;;
 uninit) shift; cmd_uninit "$@" ;;
@@ -319,5 +458,7 @@ new) shift; cmd_new "$@" ;;
 fill) shift; cmd_fill "$@" ;;
 drop) shift; cmd_drop "$@" ;;
 config) shift; cmd_config "$@" ;;
+open) shift; [ $# -ge 1 ] || usage; cmd_open "$@" ;;
+debug) shift; [ $# -eq 1 ] || usage; cmd_debug "$@" ;;
 *) usage ;;
 esac

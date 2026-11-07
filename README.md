@@ -8,8 +8,8 @@ Runs a preconfigured Pi coding agent in a "jail" preventing it from wreaking hav
 podman build . -t pi-jail:latest
 ```
 
-2. Copy the `./pi` and `./pctl` scripts to your path (do not keep `pctl` inside an adopted repo - the root is
-   dematerialized by `pctl init`).
+2. Copy the `./pj` script to your path (do not keep it inside an adopted repo - the root is dematerialized by
+   `pj init`).
 
 3. Set up the person configuration - LLM gateway and MCP gateways (see [Person configuration](#person-configuration)):
 
@@ -20,10 +20,10 @@ podman pull docker.io/maximhq/bifrost:latest
 4. Adopt a project (from its jj repo root):
 
 ```
-pctl init
+pj init
 ```
 
-`pctl init` adopts the repo in place and turns the root into a bare-ish host: project files live in commits and
+`pj init` adopts the repo in place and turns the root into a bare-ish host: project files live in commits and
 workspaces, not on disk at the root.
 
 ```
@@ -33,26 +33,31 @@ workspaces, not on disk at the root.
 |- ws/<name>            # colocated jj workspaces
 ```
 
-5. Create a workspace and start the agent in it:
+5. Create a workspace and open the agent in it:
 
 ```
-pctl new mytask
-pi mytask
+pj new ws/mytask
+pj open ws/mytask
 ```
 
-- `pctl new <name>` - create workspace `ws/<name>` at the root's current state and symlink `shared/project` entries into
+Workspace arguments accept both the bare name and the `ws/` path (`pj open mytask`, `pj open ws/mytask`) - the
+path form is what shell completion offers.
+
+- `pj new <name>` - create workspace `ws/<name>` at the root's current state and symlink `shared/project` entries into
   it
-- `pctl fill <name>` - symlink new `shared/project` entries into a workspace
-- `pctl drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
+- `pj fill <name>` - symlink new `shared/project` entries into a workspace
+- `pj drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
   overrides; the working copy is snapshotted into a commit before removal either way). Also removes the workspace's
   extra-mount config (see [Extra mounts](#extra-mounts))
-- `pctl config <name>` - print the workspace's extra mounts
-- `pctl config set <name> -v <src>:<dst>[:<opts>]...` - replace the workspace's extra mounts
-- `pctl config add <name> -v <src>:<dst>[:<opts>]...` - add extra mounts to the workspace
-- `pctl uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
+- `pj config <name>` - print the workspace's extra mounts
+- `pj config set <name> -v <src>:<dst>[:<opts>]...` - replace the workspace's extra mounts
+- `pj config add <name> -v <src>:<dst>[:<opts>]...` - add extra mounts to the workspace
+- `pj uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
   workspaces' landed work (merged when several diverged); refuses while any workspace has unlanded work (`--force`
   overrides; the working copies are snapshotted and kept either way). `shared/` is left behind - `rm -rf shared` once
   you no longer need the jail home and the shared entries
+- `pj open <name> [args...]` - run the pi coding agent in the workspace's jail
+- `pj debug <name>` - start a shell in the workspace's jail
 
 `shared/project` entries land in workspaces as untracked symlinks. They are expected to be covered by the repo's own
 ignore rules (e.g. `node_modules` in `.gitignore`); entries that are not ignored show up as uncommitted changes in the
@@ -60,7 +65,7 @@ workspaces.
 
 ## How the jail works
 
-`pi ws <worktree>` runs the container with five project mounts: the workspace at `/work/ws/<worktree>` (the working
+`pj open <worktree>` runs the container with five project mounts: the workspace at `/work/ws/<worktree>` (the working
 directory), the repo data at `/work/.jj/repo` and `/work/.git` (the workspace must write there to commit),
 `shared/project` at `/work/shared/project` (behind the `../../shared/project` symlinks) and `shared/home` as `/home`.
 Every relative reference from the worktree - its `.jj`/`.git` pointers, the shared symlinks - resolves exactly like on
@@ -88,17 +93,17 @@ project (a reference repo, datasets, a tool cache). The mounts are persisted per
 root (git-excluded, not mounted into the jail itself, so the agent cannot edit its own mount config):
 
 ```
-pctl config set mytask -v ~/refs/big-monorepo:/refs:ro -v ~/.cache/pip:/cache
-pi mytask
+pj config set mytask -v ~/refs/big-monorepo:/refs:ro -v ~/.cache/pip:/cache
+pj open mytask
 ```
 
-Each `-v` takes a podman volume spec `<src>:<dst>[:<opts>]`; `pctl config add` appends, `pctl config <name>` prints.
-`pi ws` and `pi debug` both pick the mounts up and announce them on startup. The extra mounts are appended after the
+Each `-v` takes a podman volume spec `<src>:<dst>[:<opts>]`; `pj config add` appends, `pj config <name>` prints.
+`pj open` and `pj debug` both pick the mounts up and announce them on startup. The extra mounts are appended after the
 fixed project mounts, so they can shadow them (`/home`, `/work/...`); hand-edits to the file are allowed too - one spec
 per line under a `[<workspace>]` header, `#` comments and blank lines are skipped.
 
 Bind sources must exist when the workspace starts (podman would otherwise auto-create them as root-owned junk on the
-host; `pctl config` rejects them at write time). `:z` is not added automatically - it persistently relabels the host
+host; `pj config` rejects them at write time). `:z` is not added automatically - it persistently relabels the host
 directory, so opting in is your call (add it to the spec when SELinux enforcing blocks the access).
 
 ## Person configuration
@@ -116,10 +121,10 @@ Everything person-specific is a bundle in `~/.config/pi-jail/`, injected at `pod
 | `mcp.env`       | real MCP credentials                                      | host MCP services                |
 | `settings.json` | pi settings incl. the default model                       | jail (copied into `shared/home`) |
 
-- `./pi` mounts `models.json` and `mcp.json` read-only over the seeded stubs (curated on the host, pi never writes them)
+- `pj` mounts `models.json` and `mcp.json` read-only over the seeded stubs (curated on the host, pi never writes them)
   and copies `settings.json` into `shared/home` on the project's first run: pi writes settings at runtime
   (`defaultModel`, theme), so changes stay contained in the project instead of mutating the person-global file.
-- `./pi` maps the host loopback into the jail (`pasta --map-host-loopback`), because rootless podman blocks loopback by
+- `pj` maps the host loopback into the jail (`pasta --map-host-loopback`), because rootless podman blocks loopback by
   default. The proxy and the host MCP services all bind loopback and are reached as `host.containers.internal`.
   Tradeoff: every host loopback service becomes reachable from the jail.
 - The jail only ever receives virtual keys and service URLs - real keys (LLM or MCP) never enter it.
@@ -128,7 +133,8 @@ Setup:
 
 ```
 mkdir -p ~/.config/pi-jail ~/.config/systemd/user
-cp proxy/config.json.example proxy/models.json.example proxy/settings.json.example proxy/mcp.json.example ~/.config/pi-jail/
+cp proxy/config.json.example proxy/models.json.example proxy/settings.json.example
+  proxy/mcp.json.example ~/.config/pi-jail/
 mv ~/.config/pi-jail/models.json.example ~/.config/pi-jail/models.json
 mv ~/.config/pi-jail/settings.json.example ~/.config/pi-jail/settings.json
 mv ~/.config/pi-jail/mcp.json.example ~/.config/pi-jail/mcp.json
