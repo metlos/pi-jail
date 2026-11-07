@@ -1,0 +1,5 @@
+# extra-mount config written by pctl config / hand-edited per workspace
+pi-jail.conf
+
+# smoke test scratch
+.smoke-tmp/

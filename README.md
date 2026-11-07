@@ -44,7 +44,11 @@ pi mytask
   it
 - `pctl fill <name>` - symlink new `shared/project` entries into a workspace
 - `pctl drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
-  overrides; the working copy is snapshotted into a commit before removal either way)
+  overrides; the working copy is snapshotted into a commit before removal either way). Also removes the workspace's
+  extra-mount config (see [Extra mounts](#extra-mounts))
+- `pctl config <name>` - print the workspace's extra mounts
+- `pctl config set <name> -v <src>:<dst>[:<opts>]...` - replace the workspace's extra mounts
+- `pctl config add <name> -v <src>:<dst>[:<opts>]...` - add extra mounts to the workspace
 - `pctl uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
   workspaces' landed work (merged when several diverged); refuses while any workspace has unlanded work (`--force`
   overrides; the working copies are snapshotted and kept either way). `shared/` is left behind - `rm -rf shared` once
@@ -61,12 +65,32 @@ directory), the repo data at `/work/.jj/repo` and `/work/.git` (the workspace mu
 `shared/project` at `/work/shared/project` (behind the `../../shared/project` symlinks) and `shared/home` as `/home`.
 Every relative reference from the worktree - its `.jj`/`.git` pointers, the shared symlinks - resolves exactly like on
 the host, so jj, git and the shared entries all work inside the jail. The jail boundary is one workspace plus the
-repository: the agent can read and write its own working copy and every commit (all workspaces share one repository,
-so landed work of other workspaces is visible by design), but never sees other workspaces' working copies, the repo
-root, or anything outside the project.
+repository: the agent can read and write its own working copy and every commit (all workspaces share one repository, so
+landed work of other workspaces is visible by design), but never sees other workspaces' working copies, the repo root,
+or anything outside the project - except the workspace's [extra mounts](#extra-mounts), if any.
 
 Requires rootless podman (`--userns=keep-id` maps your uid into the container) and SELinux relabeling of the mounted
 trees (`:z`). Needs jj >= 0.46 (colocated workspaces) and git >= 2.42.
+
+## Extra mounts
+
+A workspace can get additional host directories mounted into the jail - useful when it needs access to files outside the
+project (a reference repo, datasets, a tool cache). The mounts are persisted per workspace in `pi-jail.conf` at the repo
+root (git-excluded, not mounted into the jail itself, so the agent cannot edit its own mount config):
+
+```
+pctl config set mytask -v ~/refs/big-monorepo:/refs:ro -v ~/.cache/pip:/cache
+pi mytask
+```
+
+Each `-v` takes a podman volume spec `<src>:<dst>[:<opts>]`; `pctl config add` appends, `pctl config <name>` prints.
+`pi ws` and `pi debug` both pick the mounts up and announce them on startup. The extra mounts are appended after the
+fixed project mounts, so they can shadow them (`/home`, `/work/...`); hand-edits to the file are allowed too - one spec
+per line under a `[<workspace>]` header, `#` comments and blank lines are skipped.
+
+Bind sources must exist when the workspace starts (podman would otherwise auto-create them as root-owned junk on the
+host; `pctl config` rejects them at write time). `:z` is not added automatically - it persistently relabels the host
+directory, so opting in is your call (add it to the spec when SELinux enforcing blocks the access).
 
 ## Person configuration
 
@@ -136,10 +160,10 @@ silently dropped all three from streams, which broke every tool-using turn in th
 - Claude models speak the Anthropic protocol end to end: the `anthropic` provider in `models.json` points at the
   gateway's `/anthropic_passthrough` endpoint, which forwards `/v1/messages` to the anthropic-protocol upstream
   (`anthropic` provider + `base_url` override in `config.json`).
-- The gateway keeps a SQLite store (config + logs) under `~/.local/state/pi-jail/bifrost`; `config.json` is copied
-  there on every service start and is the source of truth (`source_of_truth`), so edits to
-  `~/.config/pi-jail/config.json` apply on restart - including removals, which prune the stored rows. First start after
-  boot/login takes ~20s (store migrations) - until then the jail cannot reach the gateway.
+- The gateway keeps a SQLite store (config + logs) under `~/.local/state/pi-jail/bifrost`; `config.json` is copied there
+  on every service start and is the source of truth (`source_of_truth`), so edits to `~/.config/pi-jail/config.json`
+  apply on restart - including removals, which prune the stored rows. First start after boot/login takes ~20s (store
+  migrations) - until then the jail cannot reach the gateway.
 
 To share the keys with your shell (systemd services never see `.zshrc`, so the flow is inverted: the shell sources the
 gateway's file), add to `.zshrc`:
@@ -159,11 +183,11 @@ can see them.
 Adding a model: add an entry to `~/.config/pi-jail/models.json`, with the provider prefix in its id (`myrouter/<id>`).
 Nothing else - routing works by the id's prefix.
 
-Adding a provider: a `providers` entry in `config.json` (plus its `provider_configs` permission on the virtual key),
-a provider block in `models.json`, and the key vars in `bifrost.env` (real) and `jail.env` (virtual). A name not
-built into Bifrost also needs `custom_provider_config` with a `base_provider_type`, and a `network_config.base_url`
-that excludes `/v1` - Bifrost appends the full `/v1/chat/completions` path itself. Built-in provider names
-(`openrouter`, ...) are reserved and cannot be reused for custom providers.
+Adding a provider: a `providers` entry in `config.json` (plus its `provider_configs` permission on the virtual key), a
+provider block in `models.json`, and the key vars in `bifrost.env` (real) and `jail.env` (virtual). A name not built
+into Bifrost also needs `custom_provider_config` with a `base_provider_type`, and a `network_config.base_url` that
+excludes `/v1` - Bifrost appends the full `/v1/chat/completions` path itself. Built-in provider names (`openrouter`,
+...) are reserved and cannot be reused for custom providers.
 
 ## MCP gateways
 

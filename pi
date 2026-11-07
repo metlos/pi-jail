@@ -1,13 +1,13 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 usage() {
-  echo "usage: pi <command> <worktree>
+	echo "usage: pi <command> <worktree>
 
 commands:
   ws <worktree> [args...]   run the pi coding agent in the worktree
   debug <worktree>          start a shell in the worktree's container" >&2
-  exit 2
+	exit 2
 }
 
 [ $# -ge 2 ] || usage
@@ -17,42 +17,79 @@ shift 2
 
 case $mode in
 ws) set -- pi "$@" ;;
-debug) [ $# -eq 0 ] || usage
-  set -- bash
-  ;;
+debug)
+	[ $# -eq 0 ] || usage
+	set -- bash
+	;;
 *) usage ;;
 esac
 case $worktree in . | .. | */*) {
-  echo "bad worktree name" >&2
-  exit 2
+	echo "bad worktree name" >&2
+	exit 2
 } ;; esac
 
 # jail config: lives outside the image and the project mount, injected here
 # at run time (models.json mounted over the seeded stub, settings.json copied)
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/pi-jail"
 for f in jail.env models.json settings.json mcp.json; do
-  [ -f "$cfg/$f" ] || {
-    echo "pi: missing $cfg/$f - see the LLM proxy section in the pi-jail README" >&2
-    exit 1
-  }
+	[ -f "$cfg/$f" ] || {
+		echo "pi: missing $cfg/$f - see the LLM proxy section in the pi-jail README" >&2
+		exit 1
+	}
 done
 
 # fail fast instead of letting podman auto-create missing bind sources as
 # root-owned junk on the host
 for d in .jj/repo .git "ws/$worktree" shared/project; do
-  [ -d "$d" ] || {
-    echo "pi: missing $PWD/$d - run from an initialized project root (pctl init, pctl new $worktree)" >&2
-    exit 1
-  }
+	[ -d "$d" ] || {
+		echo "pi: missing $PWD/$d - run from an initialized project root (pctl init, pctl new $worktree)" >&2
+		exit 1
+	}
 done
 
-echo starting $mode in workspace "$worktree"
+# extra mounts for this workspace: pi-jail.conf [<worktree>] section at the
+# repo root, one podman -v spec per line (pctl config). Appended after the
+# fixed mounts below, so they can shadow them. Validated here because
+# hand-edits bypass pctl; a missing src would otherwise make podman
+# auto-create root-owned junk on the host. The conf stays outside the jail.
+declare -a extra_vols=()
+if [ -f pi-jail.conf ]; then
+	in_section=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=${line%$'\r'}
+		case $line in
+		"[$worktree]") in_section=1 ;;
+		\[*) in_section=0 ;;
+		'#'*) ;;
+		'') ;;
+		*)
+			if [ "$in_section" -eq 1 ]; then
+				src=${line%%:*}
+				[ -e "$src" ] || {
+					echo "pi: pi-jail.conf [$worktree]: no such host path: $src" >&2
+					exit 1
+				}
+				extra_vols+=("-v" "$line")
+			fi
+			;;
+		esac
+	done <pi-jail.conf
+fi
 
 # settings are seeded per project (first run only): pi writes them inside the
 # jail (defaultModel, theme), so changes stay in this project instead of
 # mutating the person-global config
 mkdir -p "$PWD/shared/home/.pi/agent"
 cp -n "$cfg/settings.json" "$PWD/shared/home/.pi/agent/settings.json"
+
+# announce the extra mounts: the jail boundary differs per config, keep it
+# visible instead of silently behaving differently per repo
+if [ ${#extra_vols[@]} -gt 0 ]; then
+	dsts=" ${extra_vols[@]}"
+	echo "starting $mode in workspace $worktree (extra mounts:${dsts// -v / })"
+else
+	echo "starting $mode in workspace $worktree"
+fi
 
 # keep-id: rootless podman must map the host uid to itself (plain --user maps
 # it to a subuid, which owns nothing on the host). :z relabels the mounts for
@@ -64,23 +101,25 @@ cp -n "$cfg/settings.json" "$PWD/shared/home/.pi/agent/settings.json"
 # entries. Every reference in between (the .jj/repo and .git pointer files,
 # the ../../shared/project symlinks) is relative and resolves under this
 # mirrored /work layout exactly like on the host; other workspaces' working
-# copies and the repo root stay invisible. Jail boundary = workspace + repo.
+# copies and the repo root stay invisible. Jail boundary = workspace + repo
+# (+ the extra mounts above).
 #
 # The LLM proxy binds host loopback, which rootless podman blocks by default
 # (host.containers.internal points at the host's real address, not loopback),
 # so map loopback to 169.254.1.3 and repoint the name there. Side effect:
 # all host loopback services become reachable from the jail.
 podman run --rm -it \
-  --userns=keep-id \
-  --network=pasta:--map-host-loopback,169.254.1.3 \
-  --add-host host.containers.internal:169.254.1.3 \
-  --env-file "$cfg/jail.env" \
-  -v "$cfg/models.json:/home/.pi/agent/models.json:ro,z" \
-  -v "$cfg/mcp.json:/home/.pi/agent/mcp.json:ro,z" \
-  -v "$PWD/ws/$worktree:/work/ws/$worktree:z" \
-  -v "$PWD/.jj/repo:/work/.jj/repo:z" \
-  -v "$PWD/.git:/work/.git:z" \
-  -v "$PWD/shared/project:/work/shared/project:z" \
-  -v "$PWD/shared/home:/home:z" \
-  --workdir "/work/ws/$worktree" \
-  pi-jail:latest "$@"
+	--userns=keep-id \
+	--network=pasta:--map-host-loopback,169.254.1.3 \
+	--add-host host.containers.internal:169.254.1.3 \
+	--env-file "$cfg/jail.env" \
+	-v "$cfg/models.json:/home/.pi/agent/models.json:ro,z" \
+	-v "$cfg/mcp.json:/home/.pi/agent/mcp.json:ro,z" \
+	-v "$PWD/ws/$worktree:/work/ws/$worktree:z" \
+	-v "$PWD/.jj/repo:/work/.jj/repo:z" \
+	-v "$PWD/.git:/work/.git:z" \
+	-v "$PWD/shared/project:/work/shared/project:z" \
+	-v "$PWD/shared/home:/home:z" \
+	"${extra_vols[@]}" \
+	--workdir "/work/ws/$worktree" \
+	pi-jail:latest "$@"

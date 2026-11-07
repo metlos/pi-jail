@@ -1,19 +1,25 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # pctl - pi-jail project controller
 #
 # Layout (adopted in place, repo root = PROJECT_DIR):
 #   shared/home     jail home, mounted at /home by ./pi
 #   shared/project  filled into workspaces via symlinks
 #   ws/<name>       colocated jj workspaces
+#   pi-jail.conf    untracked extra-mount config, [<ws>] sections of -v specs
 #
 # Needs jj >= 0.46 (colocated workspaces, jj workspace remove).
-set -eu
+set -euo pipefail
 
 usage() {
 	echo "usage: pctl init                    adopt this jj repo into the jail layout" >&2
 	echo "       pctl new <name>              create workspace ws/<name> and fill it from shared/project" >&2
 	echo "       pctl fill <name>            fill ws/<name> with new shared/project entries" >&2
 	echo "       pctl drop [--force] <name>   remove workspace (refuses on unlanded working copy)" >&2
+	echo "       pctl config <name>           print the workspace's extra mounts (pi-jail.conf)" >&2
+	echo "       pctl config set <name> -v <src>:<dst>[:opts]..." >&2
+	echo "                                    replace the workspace's extra mounts" >&2
+	echo "       pctl config add <name> -v <src>:<dst>[:opts]..." >&2
+	echo "                                    add extra mounts to the workspace" >&2
 	echo "       pctl uninit [--force]        remove workspaces, restore full checkout at repo root" >&2
 	exit 2
 }
@@ -25,6 +31,13 @@ die() {
 
 at_repo_root() {
 	[ -d .jj ] || die "not a jj repo root; run from PROJECT_DIR"
+}
+
+# name is valid if it can never be mistaken for a section header line
+check_name() {
+	case $1 in
+	. | .. | */* | \[* | *\]*) die "bad workspace name: $1" ;;
+	esac
 }
 
 # Symlink shared/project into a workspace; existing entries win. Targets stay
@@ -47,6 +60,73 @@ ws_dirty() {
 	(cd "ws/$1" && jj diff -r @ --types) | grep -qvE '^[L-]{2} '
 }
 
+# One podman -v spec per line under [<name>] in pi-jail.conf. Comments and
+# blank lines are skipped. Empty output = no section / no mounts.
+section_lines() { # section_lines NAME
+	[ -f pi-jail.conf ] || return 0
+	local in_section=0 line
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=${line%$'\r'}
+		case $line in
+		"[$1]") in_section=1 ;;
+		\[*) in_section=0 ;;
+		'#'*) ;;
+		'') ;;
+		*) [ "$in_section" -eq 1 ] && printf '%s\n' "$line" ;;
+		esac
+	done <pi-jail.conf
+}
+
+# Rewrite pi-jail.conf with the section's lines replaced by "$@" (or removed
+# when none). Other sections, comments and blank lines are preserved as-is;
+# a section that did not exist is appended at the end. No-op without a write
+# when the file does not exist (drop must not create one).
+write_section() { # write_section NAME [LINES...]
+	local name=$1
+	shift
+	[ -f pi-jail.conf ] || [ $# -gt 0 ] || return 0
+	local tmp=.pi-jail.conf.tmp
+	local in_section=0 found=0 line
+	: >"$tmp"
+	if [ -f pi-jail.conf ]; then
+		while IFS= read -r line || [ -n "$line" ]; do
+			line=${line%$'\r'}
+			case $line in
+			"[$name]")
+				in_section=1 found=1
+				if [ $# -gt 0 ]; then # rewrite in place: header + new lines
+					printf '[%s]\n' "$name" >>"$tmp"
+					for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
+				fi
+				;;
+			\[*)
+				in_section=0
+				printf '%s\n' "$line" >>"$tmp"
+				;;
+			*)
+				[ "$in_section" -eq 1 ] || printf '%s\n' "$line" >>"$tmp"
+				;;
+			esac
+		done <pi-jail.conf
+	fi
+	if [ "$found" -eq 0 ] && [ $# -gt 0 ]; then # section not in file yet
+		[ -s "$tmp" ] && printf '\n' >>"$tmp"
+		printf '[%s]\n' "$name" >>"$tmp"
+		for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
+	fi
+	mv "$tmp" pi-jail.conf
+}
+
+# A bind source must exist: podman auto-creates missing sources as
+# root-owned host junk, and a typo should fail here, not on the next run.
+check_specs() { # check_specs SPECS...
+	local spec src
+	for spec in "$@"; do
+		src=${spec%%:*}
+		[ -e "$src" ] || die "config: no such host path: $src"
+	done
+}
+
 cmd_init() {
 	at_repo_root
 	changed=0
@@ -67,7 +147,7 @@ cmd_init() {
 	fi
 
 	# hide layout dirs from colocated git; info/exclude is local-only
-	for pat in ws/ shared/; do
+	for pat in ws/ shared/ pi-jail.conf; do
 		if ! grep -qx "$pat" .git/info/exclude 2>/dev/null; then
 			echo "$pat" >>.git/info/exclude
 			changed=1
@@ -80,15 +160,23 @@ cmd_init() {
 cmd_new() {
 	[ $# -eq 1 ] || usage
 	name=$1
-	case $name in
-	. | .. | */*) die "bad workspace name: $name" ;;
-	esac
+	check_name "$name"
 	at_repo_root
 	[ -d .git ] || die "not initialized; run pctl init first"
 
-	# -r @: without it the new working copy lands on @'s parents (a sibling
-	# of the root's current state), not on the current state itself
-	jj workspace add --colocate -r @ "ws/$name"
+	# @ is a real base only while it holds pre-adoption work or a
+	# description. The bare root's @ is a permanently empty placeholder
+	# (sparse ws-only, nested workspaces ignored by snapshotting), and
+	# basing a workspace on it bakes that empty commit into every
+	# workspace's ancestry - so skip it and share @'s parents instead.
+	if [ -z "$(jj log -r @ --no-graph -T description)" ] &&
+		! jj diff -r @ --types | grep -q .; then
+		jj workspace add --colocate "ws/$name"
+	else
+		# -r @: without it the new working copy lands on @'s parents (a
+		# sibling of the root's current state), not on the state itself
+		jj workspace add --colocate -r @ "ws/$name"
+	fi
 
 	# workspaces inherit the root's sparse pattern (ws-only); reset to full
 	(cd "ws/$name" && jj sparse set --clear --add .)
@@ -119,6 +207,57 @@ cmd_drop() {
 	fi
 
 	jj workspace remove "$name"
+
+	# extra-mount config belongs to the workspace: a later pctl new with the
+	# same name should not silently resurrect the old mounts
+	write_section "$name"
+}
+
+cmd_config() {
+	local name mode
+	if [ "${1:-}" = set ] || [ "${1:-}" = add ]; then
+		mode=$1
+		shift
+	else
+		mode=print
+	fi
+	[ $# -ge 1 ] || usage
+	name=$1
+	shift
+	at_repo_root
+
+	if [ "$mode" = print ]; then
+		[ $# -eq 0 ] || usage
+		lines=$(section_lines "$name")
+		[ -n "$lines" ] || die "no config for workspace: $name"
+		printf '%s\n' "$lines"
+		return
+	fi
+
+	declare -a specs=()
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-v | --volume)
+			[ $# -ge 2 ] || usage
+			specs+=("$2")
+			shift 2
+			;;
+		--) shift; break ;;
+		-*) usage ;;
+		*) usage ;; # name comes first; anything else is a usage error
+		esac
+	done
+	[ $# -eq 0 ] || usage
+	[ ${#specs[@]} -gt 0 ] || usage
+	check_name "$name"
+	check_specs "${specs[@]}"
+
+	if [ "$mode" = add ]; then # existing lines first, then the new ones
+		declare -a existing=()
+		while IFS= read -r line; do existing+=("$line"); done < <(section_lines "$name")
+		specs=("${existing[@]}" "${specs[@]}")
+	fi
+	write_section "$name" "${specs[@]}"
 }
 
 # Reverse of init: remove the workspaces, restore a plain full checkout at
@@ -143,10 +282,13 @@ cmd_uninit() {
 	done
 
 	# advance the root to the workspaces' landed work so the restored
-	# checkout contains it (merged when heads diverged); also keeps the
-	# workspaces' snapshot commits alive through the removal below
-	if jj log -r 'heads(@::) & ~@' --no-graph -T 'commit_id' | grep -q .; then
-		jj new 'heads(@::)'
+	# checkout contains it (merged when heads diverged). Anchored on @'s
+	# parents: workspaces are created as siblings of the root's vacuous @,
+	# and dropped workspaces leave their landed chains as anonymous heads
+	# in the same place. Snapshot commits of removed workspaces are
+	# described by jj and survive removal on their own.
+	if jj log -r 'heads(@-::) & ~@' --no-graph -T 'commit_id' | grep -q .; then
+		jj new 'heads(@-::) & ~@'
 	fi
 
 	for d in ws/*; do
@@ -159,7 +301,7 @@ cmd_uninit() {
 	jj sparse set --clear --add .
 
 	# unhide layout dirs from colocated git; info/exclude is local-only
-	for pat in ws/ shared/; do
+	for pat in ws/ shared/ pi-jail.conf; do
 		[ -f .git/info/exclude ] || continue
 		grep -vx "$pat" .git/info/exclude >.git/info/exclude.tmp || true
 		mv .git/info/exclude.tmp .git/info/exclude
@@ -176,5 +318,6 @@ uninit) shift; cmd_uninit "$@" ;;
 new) shift; cmd_new "$@" ;;
 fill) shift; cmd_fill "$@" ;;
 drop) shift; cmd_drop "$@" ;;
+config) shift; cmd_config "$@" ;;
 *) usage ;;
 esac
