@@ -69,6 +69,15 @@ repository: the agent can read and write its own working copy and every commit (
 landed work of other workspaces is visible by design), but never sees other workspaces' working copies, the repo root,
 or anything outside the project - except the workspace's [extra mounts](#extra-mounts), if any.
 
+The host's jj/git user config (`~/.config/jj`, `~/.gitconfig`, `~/.config/git`, whichever exist) is mounted into the jail
+read-only, so jj and git run with the usual identity, aliases and ignores inside - the jail home is per-project and
+would otherwise leave them unconfigured. Includes stored inside those dirs work; includes pointing elsewhere do not
+(git silently ignores them, jj errors out) - mount such dirs via [extra mounts](#extra-mounts) if needed. Signing keys
+never enter the jail: if your config signs commits, shadow it with repo-local config
+(`git config --file .git/config commit.gpgsign false`, `jj config set --repo signing.behavior drop`, both set on the
+host) and sign when landing work to main on the host - keep signing last, an in-jail rewrite of a signed commit drops
+its signature.
+
 Requires rootless podman (`--userns=keep-id` maps your uid into the container) and SELinux relabeling of the mounted
 trees (`:z`). Needs jj >= 0.46 (colocated workspaces) and git >= 2.42.
 

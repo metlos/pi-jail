@@ -29,7 +29,7 @@ vols() { # vols PODMAN_OUT
 
 # Fake project root: ./pi checks the jail config dir, then execs stub podman.
 mkproj() { # mkproj DIR PODMAN_OUT
-	mkdir -p "$1/bin" "$1/shared/home" "$1/shared/project" "$1/ws/foo" \
+	mkdir -p "$1/bin" "$1/home" "$1/shared/home" "$1/shared/project" "$1/ws/foo" \
 		"$1/.jj/repo" "$1/.git" "$1/cfg/pi-jail"
 	: >"$1/cfg/pi-jail/jail.env"
 	for f in models.json mcp.json settings.json; do : >"$1/cfg/pi-jail/$f"; done
@@ -48,10 +48,25 @@ T=$PWD/.smoke-tmp
 # --- pi: baseline without config -------------------------------------------
 out="$T/base.out"
 mkproj "$T/base" "$out"
-( cd "$T/base" && XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >/dev/null 2>&1
+( cd "$T/base" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >/dev/null 2>&1
 check "baseline keeps 7 fixed mounts" "7" "$(vols "$out" | wc -l)"
 check "baseline home mount last" \
 	"$T/base/shared/home:/home:z" "$(vols "$out" | tail -1)"
+check "baseline has no vcs config mounts" "0" "$(vols "$out" | grep -cE ':(/home/.config/jj|/home/.gitconfig|/home/.config/git):ro,z$')"
+
+# --- pi: host VCS user config is mounted read-only ---------------------------
+out="$T/vcs.out"
+mkproj "$T/vcs" "$out"
+mkdir -p "$T/vcs/home" "$T/vcs/cfg/jj" "$T/vcs/cfg/git"
+touch "$T/vcs/home/.gitconfig"
+( cd "$T/vcs" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >/dev/null 2>&1
+check "vcs config gets 3 ro mounts" "3" "$(vols "$out" | grep -cE ':(/home/.config/jj|/home/.gitconfig|/home/.config/git):ro,z$')"
+check "jj config dir mounted" "$T/vcs/cfg/jj:/home/.config/jj:ro,z" \
+	"$(vols "$out" | grep -m1 '/home/.config/jj:ro,z')"
+check "gitconfig mounted" "$T/vcs/home/.gitconfig:/home/.gitconfig:ro,z" \
+	"$(vols "$out" | grep -m1 '/home/.gitconfig:ro,z')"
+check "git config dir mounted" "$T/vcs/cfg/git:/home/.config/git:ro,z" \
+	"$(vols "$out" | grep -m1 '/home/.config/git:ro,z')"
 
 # --- pi: volumes from pi-jail.conf ------------------------------------------
 out="$T/vols.out"
@@ -67,7 +82,7 @@ $T/vols/shared/home:/home
 [bar]
 /should-not-mount:/x
 EOF
-( cd "$T/vols" && XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >"$T/vols/stdout" 2>&1
+( cd "$T/vols" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >"$T/vols/stdout" 2>&1
 check "3 extra mounts appended" "10" "$(vols "$out" | wc -l)"
 check "extra mount after fixed ones" \
 	"$T/vols/shared/project:/work/shared/project" "$(vols "$out" | sed -n '8p')"
@@ -82,7 +97,7 @@ out="$T/ws.out"
 mkproj "$T/ws" "$out"
 mkdir -p "$T/ws/my dir"
 printf '[foo]\n%s/my dir:/mnt/dir\n' "$T/ws/" >"$T/ws/pi-jail.conf"
-( cd "$T/ws" && XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >/dev/null 2>&1
+( cd "$T/ws" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >/dev/null 2>&1
 check "spaced spec mounted" "1" \
 	"$(vols "$out" | grep -c 'my dir:/mnt/dir')"
 
@@ -90,7 +105,7 @@ check "spaced spec mounted" "1" \
 out="$T/miss.out"
 mkproj "$T/miss" "$out"
 printf '[foo]\n%s:/mnt/nope\n' "$T/miss/no-such-src" >"$T/miss/pi-jail.conf"
-( cd "$T/miss" && XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >"$T/miss/stdout" 2>"$T/miss/stderr"
+( cd "$T/miss" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pi" ws foo ) >"$T/miss/stdout" 2>"$T/miss/stderr"
 check "missing src exit code" "1" "$?"
 check "missing src never runs podman" "0" "$([ -e "$out" ] && wc -l <"$out" || echo 0)"
 check "missing src error names path" "1" \

@@ -76,6 +76,19 @@ if [ -f pi-jail.conf ]; then
 	done <pi-jail.conf
 fi
 
+# host VCS user config, read-only: the jail home is per-project, so without
+# this jj/git run unconfigured inside (no identity, no aliases, no ignores).
+# The whole config dirs, not single files, so includes/ inside them work.
+# Includes pointing elsewhere stay broken (git: silently ignored; jj: hard
+# error) - mount those dirs via pi-jail.conf if needed. Signing keys stay
+# out: shadow with repo-local config (git commit.gpgsign, jj signing.behavior)
+# and sign on the host when merging to main.
+declare -a vcs_vols=()
+xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+for spec in "$xdg/jj:/home/.config/jj" "$HOME/.gitconfig:/home/.gitconfig" "$xdg/git:/home/.config/git"; do
+	if [ -e "${spec%%:*}" ]; then vcs_vols+=("-v" "$spec:ro,z"); fi
+done
+
 # settings are seeded per project (first run only): pi writes them inside the
 # jail (defaultModel, theme), so changes stay in this project instead of
 # mutating the person-global config
@@ -115,6 +128,7 @@ podman run --rm -it \
 	--env-file "$cfg/jail.env" \
 	-v "$cfg/models.json:/home/.pi/agent/models.json:ro,z" \
 	-v "$cfg/mcp.json:/home/.pi/agent/mcp.json:ro,z" \
+	"${vcs_vols[@]}" \
 	-v "$PWD/ws/$worktree:/work/ws/$worktree:z" \
 	-v "$PWD/.jj/repo:/work/.jj/repo:z" \
 	-v "$PWD/.git:/work/.git:z" \
