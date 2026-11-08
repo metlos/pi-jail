@@ -31,8 +31,45 @@ die() {
 	exit 1
 }
 
-at_repo_root() {
-	[ -d .jj ] || die "not a jj repo root; run from PROJECT_DIR"
+# A dir is the project root when it carries the adoption marks: ws/ or
+# shared/ exist, it hosts the jj repo (the default workspace's .jj/repo is
+# a real dir; added workspaces carry only a pointer file), and its default
+# workspace has a narrowed sparse checkout (pj init dematerializes the
+# root). Layout dirs alone are not enough - shared/ is a common name.
+is_root() { # is_root DIR
+	[ -d "$1/ws" ] || [ -d "$1/shared" ] || return 1
+	[ -d "$1/.jj/repo" ] || return 1
+	local sparse
+	sparse=$(cd "$1" && jj sparse list 2>/dev/null) || return 1
+	[ "$sparse" != "." ]
+}
+
+# Locate the project root and make it the cwd: pj may be invoked from any
+# subdir (including a workspace - its .jj is a pointer to the repo, not a
+# root). The root is the nearest ancestor conforming to the pj layout (see
+# is_root), the invocation dir itself included. Without one, fall back to
+# the innermost real jj root (.jj/repo exists; a workspace's .jj has no
+# repo dir) - adoption (pj init) has not run yet. Root-relative state
+# (pi-jail.conf, ws/, shared/) then lands at the root regardless of cwd.
+cd_root() {
+	local dir=$PWD
+	while [ "$dir" != / ]; do
+		if is_root "$dir"; then
+			cd "$dir" || die "cannot cd to $dir"
+			return
+		fi
+		dir=$(dirname "$dir")
+	done
+	dir=$PWD
+	while :; do
+		if [ -d "$dir/.jj/repo" ]; then
+			cd "$dir" || die "cannot cd to $dir"
+			return
+		fi
+		[ "$dir" = / ] && break
+		dir=$(dirname "$dir")
+	done
+	die "not a jj repo root; run from PROJECT_DIR"
 }
 
 # Accept both "name" and "ws/name" (shell completion offers the latter) and
@@ -65,6 +102,25 @@ fill_shared() {
 # tolerated - those are pj's own filled entries from shared/project.
 ws_dirty() {
 	(cd "ws/$1" && jj diff -r @ --types) | grep -qvE '^[L-]{2} '
+}
+
+# A workspace narrowed by a stray `jj sparse set` (patterns are
+# workspace-root-relative, and a clean working copy leaves no oplog trace)
+# presents as an empty directory; the jail must not open on that hollow
+# checkout, so restore the full pattern - and the files - first. Best
+# effort: without a working jj in the workspace the jail opens as before.
+ws_ensure_full() { # ws_ensure_full NAME
+	local sparse
+	# only real workspaces: below a plain dir, jj would resolve the root's
+	# default workspace and the heal would un-narrow the root
+	[ -f "ws/$1/.jj/repo" ] || return 0
+	if ! sparse=$(cd "ws/$1" && jj sparse list 2>/dev/null); then
+		return 0
+	fi
+	if [ "$sparse" != "." ]; then
+		echo "note: ws/$1 was narrowed to sparse '$sparse'; resetting to full"
+		(cd "ws/$1" && jj sparse set --clear --add .)
+	fi
 }
 
 # One podman -v spec per line under [<name>] in pi-jail.conf. Comments and
@@ -135,7 +191,7 @@ check_specs() { # check_specs SPECS...
 }
 
 cmd_init() {
-	at_repo_root
+	cd_root
 	changed=0
 
 	# colocate so workspaces get real git worktrees (git tooling works in ws/*)
@@ -168,7 +224,7 @@ cmd_new() {
 	[ $# -eq 1 ] || usage
 	local name
 	name=$(ws_name "$1")
-	at_repo_root
+	cd_root
 	[ -d .git ] || die "not initialized; run pj init first"
 
 	# @ is a real base only while it holds pre-adoption work or a
@@ -193,7 +249,7 @@ cmd_new() {
 
 cmd_fill() {
 	[ $# -eq 1 ] || usage
-	at_repo_root
+	cd_root
 	fill_shared "$(ws_name "$1")"
 }
 
@@ -206,7 +262,7 @@ cmd_drop() {
 	[ $# -eq 1 ] || usage
 	local name
 	name=$(ws_name "$1")
-	at_repo_root
+	cd_root
 
 	# jj workspace remove snapshots the working copy first, so nothing is
 	# lost even with --force.
@@ -232,7 +288,8 @@ cmd_config() {
 	[ $# -ge 1 ] || usage
 	name=$(ws_name "$1")
 	shift
-	at_repo_root
+	local inv=$PWD # -v srcs resolve against the invocation dir, not the root
+	cd_root
 
 	if [ "$mode" = print ]; then
 		[ $# -eq 0 ] || usage
@@ -258,6 +315,15 @@ cmd_config() {
 	done
 	[ $# -eq 0 ] || usage
 	[ ${#specs[@]} -gt 0 ] || usage
+	# relative -v srcs resolve against the invocation dir, not the root
+	local i spec src
+	for i in "${!specs[@]}"; do
+		spec=${specs[i]} src=${spec%%:*}
+		case $src in
+		/*) ;;
+		*) specs[i]="$inv/$src:${spec#*:}" ;;
+		esac
+	done
 	check_specs "${specs[@]}"
 
 	if [ "$mode" = add ]; then # existing lines first, then the new ones
@@ -278,7 +344,7 @@ cmd_uninit() {
 		shift
 	fi
 	[ $# -eq 0 ] || usage
-	at_repo_root
+	cd_root
 	[ -d ws ] || [ -d shared ] || die "not an adopted repo"
 
 	local d name
@@ -336,6 +402,7 @@ cmd_debug() {
 run_jail() { # run_jail NAME CMD [ARGS...]
 	local name=$1
 	shift
+	cd_root
 
 	# jail config: lives outside the image and the project mount, injected here
 	# at run time (models.json mounted over the seeded stub, settings.json copied)
@@ -357,6 +424,8 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 			exit 1
 		}
 	done
+
+	ws_ensure_full "$name"
 
 	# extra mounts for this workspace: pi-jail.conf [<name>] section at the
 	# repo root, one podman -v spec per line. Appended after the fixed mounts
