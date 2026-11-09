@@ -31,6 +31,9 @@ die() {
 	exit 1
 }
 
+# invocation dir: pj may be cd'ed elsewhere (cd_root) before using it
+inv=$PWD
+
 # A dir is the project root when it carries the adoption marks: ws/ or
 # shared/ exist, it hosts the jj repo (the default workspace's .jj/repo is
 # a real dir; added workspaces carry only a pointer file), and its default
@@ -72,11 +75,34 @@ cd_root() {
 	die "not a jj repo root; run from PROJECT_DIR"
 }
 
-# Accept both "name" and "ws/name" (shell completion offers the latter) and
-# echo the bare name. A name is valid only if it can never be mistaken for a
-# pi-jail.conf section header line.
+# Resolve a workspace argument to the bare name and echo it. Two forms:
+#   name form: "name" or "ws/name" (shell completion offers the latter)
+#   path form: a relative path (".", "..", "x/y") resolves against the
+#     invocation dir; when it lands inside the project root's ws/, the
+#     workspace is the first path component below ws/ - so "pj open ."
+#     inside ws/<name> opens that workspace. The name form always wins:
+#     a workspace named like a dir is never shadowed.
+# A name is valid only if it can never be mistaken for a pi-jail.conf
+# section header line.
 ws_name() { # ws_name ARG
-	local name=${1#ws/}
+	local name
+	case $1 in
+	. | .. | ./* | ../* | */*)
+		local dir
+		dir=$(cd "$inv/$1" 2>/dev/null && pwd -P) || dir=
+		if [ -n "$dir" ] && [ -d ws ]; then
+			local root
+			root=$(cd ws && pwd -P)
+			case $dir/ in
+				"$root"/*) [ "$dir" != "$root" ] && name=${dir#"$root"/} && name=${name%%/*} ;;
+			esac
+		fi
+		# the path missed (e.g. "ws/name" from a sibling workspace): fall
+		# back to the name form rather than dying
+		[ -n "$name" ] || name=${1#ws/}
+		;;
+	*) name=${1#ws/} ;;
+	esac
 	case $name in
 	"" | . | .. | \[* | *\]* | */*) die "bad workspace: $1" ;;
 	esac
@@ -222,9 +248,9 @@ cmd_init() {
 
 cmd_new() {
 	[ $# -eq 1 ] || usage
+	cd_root
 	local name
 	name=$(ws_name "$1")
-	cd_root
 	[ -d .git ] || die "not initialized; run pj init first"
 
 	# @ is a real base only while it holds pre-adoption work or a
@@ -260,9 +286,9 @@ cmd_drop() {
 		shift
 	fi
 	[ $# -eq 1 ] || usage
+	cd_root
 	local name
 	name=$(ws_name "$1")
-	cd_root
 
 	# jj workspace remove snapshots the working copy first, so nothing is
 	# lost even with --force.
@@ -278,6 +304,7 @@ cmd_drop() {
 }
 
 cmd_config() {
+	cd_root
 	local name mode
 	if [ "${1:-}" = set ] || [ "${1:-}" = add ]; then
 		mode=$1
@@ -288,8 +315,8 @@ cmd_config() {
 	[ $# -ge 1 ] || usage
 	name=$(ws_name "$1")
 	shift
-	local inv=$PWD # -v srcs resolve against the invocation dir, not the root
-	cd_root
+	# the global $inv (invocation dir) resolves relative -v srcs; cd_root
+	# and ws_name have already cd'ed us to the project root
 
 	if [ "$mode" = print ]; then
 		[ $# -eq 0 ] || usage
@@ -389,12 +416,14 @@ cmd_uninit() {
 
 cmd_open() {
 	local name
+	cd_root
 	name=$(ws_name "$1")
 	shift
 	run_jail "$name" pi "$@"
 }
 
 cmd_debug() {
+	cd_root
 	run_jail "$(ws_name "$1")" bash
 }
 

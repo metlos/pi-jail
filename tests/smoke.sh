@@ -219,6 +219,38 @@ mkdir -p "$X/plain/.jj/repo" "$X/plain/deep"
 check "config from a subdir of an unadopted repo uses its jj root" "1" "$([ -f "$X/plain/pi-jail.conf" ] && echo 1 || echo 0)"
 check "config from a subdir leaves no conf in the cwd" "0" "$([ -e "$X/plain/deep/pi-jail.conf" ] && echo 1 || echo 0)"
 
+# --- workspace resolution is invocation-dir aware ----------------------------
+# given: pj open invoked from inside a workspace or from ws/
+# then: "." and sibling paths resolve to the workspace around/beside the cwd,
+# and a bare name still resolves as before
+out="$T/cwd.out"
+mkproj "$T/cwd" "$out"
+mkdir -p "$T/cwd/ws/foo/deep" "$T/cwd/ws/bar"
+open_cwd() { # open_cwd DIR ARGS...
+	( cd "$1" && HOME="$T/cwd/home" XDG_CONFIG_HOME="$T/cwd/cfg" PATH="$T/cwd/bin:$PATH" \
+		"$OLDPWD/pj" open "${@:2}" ) >/dev/null 2>&1
+}
+open_cwd "$T/cwd/ws/foo" .
+check "open . inside a workspace mounts it" "$T/cwd/ws/foo:/work/ws/foo:z" \
+	"$(vols "$out" | grep -m1 '/work/ws/foo:z')"
+open_cwd "$T/cwd/ws/foo/deep" .
+check "open . deep inside a workspace mounts it" "$T/cwd/ws/foo:/work/ws/foo:z" \
+	"$(vols "$out" | grep -m1 '/work/ws/foo:z')"
+open_cwd "$T/cwd/ws/bar" ../foo
+check "open ../sibling from a workspace mounts the sibling" "$T/cwd/ws/foo:/work/ws/foo:z" \
+	"$(vols "$out" | grep -m1 '/work/ws/foo:z')"
+open_cwd "$T/cwd/ws" foo
+check "open bare name from ws/ mounts it" "$T/cwd/ws/foo:/work/ws/foo:z" \
+	"$(vols "$out" | grep -m1 '/work/ws/foo:z')"
+open_cwd "$T/cwd/ws/bar" .
+check "open . in another workspace mounts that one" "$T/cwd/ws/bar:/work/ws/bar:z" \
+	"$(vols "$out" | grep -m1 '/work/ws/bar:z')"
+open_cwd "$T/cwd/ws/bar" ws/foo
+check "open ws/name from a workspace still resolves (name fallback)" \
+	"$T/cwd/ws/foo:/work/ws/foo:z" "$(vols "$out" | grep -m1 '/work/ws/foo:z')"
+open_cwd "$T/cwd" .
+check "open . at the root dies (root is not a workspace)" "1" "$?"
+
 # --- pj drop removes the section ----------------------------------------------
 mkrepo "$T/c5"
 adopt "$T/c5"

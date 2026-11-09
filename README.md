@@ -40,8 +40,9 @@ pj new ws/mytask
 pj open ws/mytask
 ```
 
-Workspace arguments accept both the bare name and the `ws/` path (`pj open mytask`, `pj open ws/mytask`) - the
-path form is what shell completion offers.
+Workspace arguments accept both the bare name and the `ws/` path (`pj open mytask`, `pj open ws/mytask`) - the path form
+is what shell completion offers. They are also invocation-dir aware: from inside `ws/mytask`, `pj open .` opens that
+workspace, and from `ws/`, `pj open mytask` resolves the same as from the root.
 
 - `pj new <name>` - create workspace `ws/<name>` at the root's current state and symlink `shared/project` entries into
   it
