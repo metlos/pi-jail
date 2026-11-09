@@ -35,8 +35,12 @@ should be public only if it performs a function absolutely required by other mod
 * Long function bodies should be either clearly separated into consecutive sections or outright split into several helper functions. We favor
 readability.
 
-* wrap the lines at 120 chars per line unless more specific formatting is required for given file. This limit includes all textual
-file types including markdown.
+* Formatting is formatter-first: if a formatter is available for
+the file type you are editing, apply it and let it own
+wrapping and alignment (markdown: the markdown-format skill).
+For free-form text — plain text, markdown, code comments —
+no line exceeds 120 chars; hand-wrap only where no formatter
+applies.
 
 ## Architecture First
 
