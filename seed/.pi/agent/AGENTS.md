@@ -149,16 +149,3 @@ creating a todo list out of them and executing each todo item in a separate sub 
 with a model that is just up to the task. Never assign more capable model to a task a less capable model can achieve, too. Don't make the subagents inherit your context. Just
 supply them with only the instructions they need to fulfill their goal.
 
-### Models
-
-#### gpt-6-luna (high)
-
-Use for quick tasks: reads, searches, commands, and simple/mechanical edits.
-
-#### gpt-6.1-sol (high)
-
-Use for implementation and tests.
-
-#### gpt-6.1-sol (xhigh)
-
-Use for complex analysis, architecture, and strategy.
