@@ -16,7 +16,7 @@ RUN dnf update -y \
   uv \
   python3 \
   python3-pip \
-  diff-utils \
+  diffutils \
   patch \
   && dnf clean all
 
