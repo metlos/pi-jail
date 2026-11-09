@@ -1,5 +1,21 @@
 # Personal Preferences
 
+## Jailed Environment
+
+You run in a container jail, not on the host:
+
+* You see exactly one workspace (`/work/ws/<name>`, your working directory) plus the shared repository
+  (`/work/.jj`, `/work/.git`): every commit is visible and writable, other workspaces' working copies are not. That
+  is by design - do not try to "fix" their absence.
+* Nothing outside `/work` and `/home` exists for you (except extra mounts, if the human added any). If a task needs
+  host files, ask for an extra mount (`pj config add <name> -v <src>:<dst>`, run by the human on the host).
+* `../../shared/project` entries (e.g. `node_modules`) are untracked symlinks into `/work/shared/project`, covered
+  by the repo's ignore rules - expected, not junk.
+* `~/.pi/agent/models.json` and `mcp.json` are host-curated read-only mounts - never edit them, ask the human. Real
+  API keys never enter the jail.
+* Commits are unsigned here; the human signs when landing work on the host. In-jail rewrite of a signed commit drops
+  its signature - keep signing last.
+
 ## General instructions
 
 * Double check all facts, citations, examples, ...
