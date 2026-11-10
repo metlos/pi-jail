@@ -96,20 +96,19 @@ mkproj "$T/vols" "$out"
 cat >"$T/vols/pi-jail.conf" <<EOF
 # comment
 
-[foo]
+[volumes]
 $T/vols/shared/project:/work/shared/project
 /tmp:/mnt/tmp:z
 $T/vols/shared/home:/home
 
-[bar]
-/should-not-mount:/x
+[env]
+KEEP=value
 EOF
 ( cd "$T/vols" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pj" open foo ) >"$T/vols/stdout" 2>&1
 check "3 extra mounts appended" "10" "$(vols "$out" | wc -l)"
 check "extra mount after fixed ones" \
 	"$T/vols/shared/project:/work/shared/project" "$(vols "$out" | sed -n '8p')"
-check "other section not mounted" "0" \
-	"$(vols "$out" | grep -c 'should-not-mount')"
+check "env section not mounted" "0" "$(vols "$out" | grep -c 'KEEP=value')"
 check "shadowing mount allowed" "1" "$(vols "$out" | grep -c ':/home$')"
 check "startup line lists mounts" "1" \
 	"$(grep -c 'extra mounts: .*/work/shared/project /tmp:/mnt/tmp:z .*/home)' "$T/vols/stdout")"
@@ -118,7 +117,7 @@ check "startup line lists mounts" "1" \
 out="$T/ws.out"
 mkproj "$T/ws" "$out"
 mkdir -p "$T/ws/my dir"
-printf '[foo]\n%s/my dir:/mnt/dir\n' "$T/ws/" >"$T/ws/pi-jail.conf"
+printf '[volumes]\n%s/my dir:/mnt/dir\n' "$T/ws/" >"$T/ws/pi-jail.conf"
 ( cd "$T/ws" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pj" open foo ) >/dev/null 2>&1
 check "spaced spec mounted" "1" \
 	"$(vols "$out" | grep -c 'my dir:/mnt/dir')"
@@ -126,12 +125,13 @@ check "spaced spec mounted" "1" \
 # --- pj open: missing src rejected --------------------------------------------
 out="$T/miss.out"
 mkproj "$T/miss" "$out"
-printf '[foo]\n%s:/mnt/nope\n' "$T/miss/no-such-src" >"$T/miss/pi-jail.conf"
+printf '[volumes]\n%s:/mnt/nope\n' "$T/miss/no-such-src" >"$T/miss/pi-jail.conf"
 ( cd "$T/miss" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pj" open foo ) >"$T/miss/stdout" 2>"$T/miss/stderr"
 check "missing src exit code" "1" "$?"
 check "missing src never runs podman" "0" "$([ -e "$out" ] && wc -l <"$out" || echo 0)"
 check "missing src error names path" "1" \
 	"$(grep -c 'no-such-src' "$T/miss/stderr")"
+check "missing src error names global section" "1" "$(grep -Fc 'pi-jail.conf [volumes]' "$T/miss/stderr")"
 
 # --- pj config ----------------------------------------------------------------
 P="$T/pj-installed" # run pj as if installed on PATH
@@ -142,58 +142,110 @@ conf() { # conf PROJ SECTION
 	awk -v s="[$2]" '$0==s{f=1;next} /^\[/{f=0} f' "$1/pi-jail.conf" 2>/dev/null
 }
 
-# set: replaces section, preserves other sections and comments
+# set: replaces project volumes, preserves global sections and comments
 mkrepo "$T/c1"
 adopt "$T/c1"
 mkdir -p "$T/c1/src"
-printf '# top\n[other]\n/a:/b\n\n[foo]\n/old:/old\n' >"$T/c1/pi-jail.conf"
-( cd "$T/c1" && "$P" config set foo -v "$T/c1/src:/work/x" -v /tmp:/mnt/tmp:z ) >/dev/null 2>&1
+printf '# top\n[env]\nKEEP=value\n[path-prepend]\n/keep\n\n[volumes]\n# first note\n\n/old:/old\n# last note\n\n' \
+	>"$T/c1/pi-jail.conf"
+( cd "$T/c1" && "$P" config set -v "$T/c1/src:/work/x" -v /tmp:/mnt/tmp:z ) >/dev/null 2>&1
 check "set exit code" "0" "$?"
 check "set replaces section lines" \
 	"$T/c1/src:/work/x
-/tmp:/mnt/tmp:z" "$(conf "$T/c1" foo)"
-check "set preserves other section" "/a:/b" "$(conf "$T/c1" other)"
-check "set preserves comment" "1" "$(grep -c '^# top' "$T/c1/pi-jail.conf")"
+/tmp:/mnt/tmp:z" "$(cd "$T/c1" && "$P" config)"
+check "set preserves env section" "KEEP=value" "$(conf "$T/c1" env)"
+check "set preserves path section" "/keep" "$(conf "$T/c1" path-prepend)"
+check "set preserves comments including inside volumes" "# top
+# first note
+# last note" "$(grep '^#' "$T/c1/pi-jail.conf")"
+check "set preserves blank lines including inside volumes" "3" "$(grep -cx '' "$T/c1/pi-jail.conf")"
 
 # set: creates the section in a new file
 mkrepo "$T/c2"
 adopt "$T/c2"
 mkdir -p "$T/c2/a" "$T/c2/c"
-( cd "$T/c2" && "$P" config set foo -v "$T/c2/a:/b" ) >/dev/null 2>&1
+( cd "$T/c2" && "$P" config set -v "$T/c2/a:/b" ) >/dev/null 2>&1
 check "set exit code (new file)" "0" "$?"
-check "set creates section" "$T/c2/a:/b" "$(conf "$T/c2" foo)"
+check "set creates section" "$T/c2/a:/b" "$(conf "$T/c2" volumes)"
 
 # add: appends to existing section
-( cd "$T/c2" && "$P" config add foo -v "$T/c2/c:/d" ) >/dev/null 2>&1
+( cd "$T/c2" && "$P" config add -v "$T/c2/c:/d" ) >/dev/null 2>&1
 check "add exit code" "0" "$?"
 check "add appends" "$T/c2/a:/b
-$T/c2/c:/d" "$(conf "$T/c2" foo)"
+$T/c2/c:/d" "$(conf "$T/c2" volumes)"
+
+# Repeated headers read as one list; edits emit that list once, retaining comments and globals.
+while IFS='|' read -r mode first second; do
+	R="$T/repeated-$mode"
+	mkrepo "$R"
+	adopt "$R"
+	printf '[volumes]\n/tmp:/mnt/first\n# first note\n\n[env]\nKEEP=value\n' >"$R/pi-jail.conf"
+	printf '[volumes]\n/tmp:/mnt/second\n# second note\n\n[path-prepend]\n/keep\n' >>"$R/pi-jail.conf"
+	(cd "$R" && "$P" config "$mode" -v /tmp:/mnt/new) >/dev/null 2>&1
+	check "$mode repeated volume sections succeeds" "0" "$?"
+	expected="${first:+$first$'\n'}${second:+$second$'\n'}/tmp:/mnt/new"
+	check "$mode repeated sections print exact ordered list once" "$expected" "$(cd "$R" && "$P" config)"
+	check "$mode repeated sections emit one header" "1" "$(grep -cxF '[volumes]' "$R/pi-jail.conf")"
+	check "$mode repeated sections preserve globals and comments" "[volumes]
+$expected
+# first note
+
+[env]
+KEEP=value
+# second note
+
+[path-prepend]
+/keep" "$(<"$R/pi-jail.conf")"
+	(cd "$R" && "$P" config add -v /tmp:/mnt/after) >/dev/null 2>&1
+	check "$mode repeated sections roundtrip add succeeds" "0" "$?"
+	check "$mode repeated sections roundtrip does not multiply mounts" "$expected
+/tmp:/mnt/after" "$(cd "$R" && "$P" config)"
+done <<'REPEATED'
+set||
+add|/tmp:/mnt/first|/tmp:/mnt/second
+REPEATED
 
 # add: creates section, keeps others
 mkrepo "$T/c3"
 adopt "$T/c3"
-mkdir -p "$T/c3/one" "$T/c3/three"
-printf '[x]\n%s/1:/2\n' "$T/c3" >"$T/c3/pi-jail.conf"
-( cd "$T/c3" && "$P" config add y -v "$T/c3/three:/4" ) >/dev/null 2>&1
-check "add creates section" "$T/c3/three:/4" "$(conf "$T/c3" y)"
-check "add keeps other section" "$T/c3/1:/2" "$(conf "$T/c3" x)"
+mkdir -p "$T/c3/three"
+printf '# keep\n[env]\nKEEP=value\n[path-prepend]\n/keep\n' >"$T/c3/pi-jail.conf"
+( cd "$T/c3" && "$P" config add -v "$T/c3/three:/4" ) >/dev/null 2>&1
+check "add creates section" "$T/c3/three:/4" "$(conf "$T/c3" volumes)"
+check "add keeps env section" "KEEP=value" "$(conf "$T/c3" env)"
+check "add keeps path section" "/keep" "$(conf "$T/c3" path-prepend)"
+check "add keeps comments" "1" "$(grep -c '^# keep' "$T/c3/pi-jail.conf")"
 
 # print (runs at the fake repo root)
-printf '[foo]\n%s/a:/b\n%s/c:/d\n' "$T/c2" "$T/c2" >"$T/c2/pi-jail.conf"
-r="$(cd "$T/c2" && "$P" config foo 2>&1)"
+printf '[volumes]\n%s/a:/b\n%s/c:/d\n' "$T/c2" "$T/c2" >"$T/c2/pi-jail.conf"
+r="$(cd "$T/c2" && "$P" config 2>&1)"
 check "print exit code" "0" "$?"
 check "print lists lines" "$T/c2/a:/b
 $T/c2/c:/d" "$r"
 
-# print of a missing section exits nonzero
-r="$(cd "$T/c1" && "$P" config nosuch 2>&1)"
+# print of missing project volumes exits nonzero
+printf '[env]\nKEEP=value\n' >"$T/c3/pi-jail.conf"
+r="$(cd "$T/c3" && "$P" config 2>&1)"
 check "print missing section exit code" "1" "$?"
+check "print missing section explains project volumes" "1" "$(printf '%s\n' "$r" | grep -c 'no project volumes')"
 
 # invalid specs are rejected at write time
 mkrepo "$T/c4"
 adopt "$T/c4"
-( cd "$T/c4" && "$P" config set foo -v "$T/c4/no:/mnt" ) >/dev/null 2>&1
+( cd "$T/c4" && "$P" config set -v "$T/c4/no:/mnt" ) >"$T/c4/stdout" 2>"$T/c4/stderr"
 check "write rejects missing src" "1" "$?"
+check "write missing src names section and path" "1" \
+	"$(grep -Fc "pi-jail.conf [volumes]: no such host path: $T/c4/no" "$T/c4/stderr")"
+check "invalid write creates no config" "0" "$([ -e "$T/c4/pi-jail.conf" ] && echo 1 || echo 0)"
+
+# Set/add require at least one volume; invalid invocation never writes.
+cp "$T/c2/pi-jail.conf" "$T/c2/original.conf"
+for mode in set add; do
+	(cd "$T/c2" && "$P" config "$mode") >/dev/null 2>&1
+	check "config $mode needs volumes" "2" "$?"
+	check "config $mode without volumes leaves config intact" "0" \
+		"$(cmp -s "$T/c2/original.conf" "$T/c2/pi-jail.conf"; echo $?)"
+done
 
 # --- pj locates the repo root from any subdir --------------------------------
 # given: pj invoked from a workspace (own .jj) or a plain subdir
@@ -201,23 +253,99 @@ check "write rejects missing src" "1" "$?"
 out="$T/root.out"
 mkproj "$T/root" "$out"
 mkdir -p "$T/root/ws/foo/.jj" # real workspaces carry their own .jj
-( cd "$T/root/ws/foo" && HOME="$T/root/home" XDG_CONFIG_HOME="$T/root/cfg" PATH="$T/root/bin:$PATH" "$OLDPWD/pj" config set foo -v /tmp:/mnt/tmp:z ) >/dev/null 2>&1
+( cd "$T/root/ws/foo" && "$P" config set -v .:/mnt/workspace ) >/dev/null 2>&1
 check "config from a workspace writes conf at the repo root" "1" "$([ -f "$T/root/pi-jail.conf" ] && echo 1 || echo 0)"
-check "config from a workspace leaves no conf in the cwd" "0" "$([ -e "$T/root/ws/foo/pi-jail.conf" ] && echo 1 || echo 0)"
+check "config from a workspace leaves no conf in the cwd" "0" \
+	"$([ -e "$T/root/ws/foo/pi-jail.conf" ] && echo 1 || echo 0)"
+check "workspace source resolves against invocation dir" "$T/root/ws/foo/.:/mnt/workspace" \
+	"$(conf "$T/root" volumes)"
 
 ( cd "$T/root/shared" && HOME="$T/root/home" XDG_CONFIG_HOME="$T/root/cfg" PATH="$T/root/bin:$PATH" "$OLDPWD/pj" open foo ) >/dev/null 2>&1
 check "open from a subdir mounts the root's workspace" "$T/root/ws/foo:/work/ws/foo:z" "$(vols "$out" | grep -m1 '/work/ws/foo:z')"
 
-( cd "$T/root/shared" && HOME="$T/root/home" XDG_CONFIG_HOME="$T/root/cfg" PATH="$T/root/bin:$PATH" "$OLDPWD/pj" config set foo -v project:/work/sp ) >/dev/null 2>&1
-check "relative -v src resolves against the invocation dir" "$T/root/shared/project:/work/sp" "$(conf "$T/root" foo)"
+( cd "$T/root/shared" && "$P" config set -v project:/work/sp ) >/dev/null 2>&1
+check "relative -v src resolves against the invocation dir" "$T/root/shared/project:/work/sp" \
+	"$(conf "$T/root" volumes)"
+(cd "$T/root" && "$P" config set -v shared/project:/work/root) >/dev/null 2>&1
+check "root-relative source resolves against invocation dir" "$T/root/shared/project:/work/root" \
+	"$(conf "$T/root" volumes)"
 
 # given: an unadopted repo in a clean location (no pj layout above it)
 # when: config is set from a subdir
 # then: the conf lands at the repo's own root (the jj-root fallback)
-mkdir -p "$X/plain/.jj/repo" "$X/plain/deep"
-( cd "$X/plain/deep" && "$P" config set foo -v /tmp:/mnt ) >/dev/null 2>&1
+mkrepo "$X/plain"
+mkdir -p "$X/plain/deep"
+printf 'project-cache/\n' >"$X/plain/.gitignore"
+(cd "$X/plain" && jj commit -m 'Project ignore baseline') >/dev/null 2>&1
+cp "$X/plain/.gitignore" "$X/plain-original.gitignore"
+( cd "$X/plain/deep" && "$P" config set -v .:/mnt ) >/dev/null 2>&1
 check "config from a subdir of an unadopted repo uses its jj root" "1" "$([ -f "$X/plain/pi-jail.conf" ] && echo 1 || echo 0)"
-check "config from a subdir leaves no conf in the cwd" "0" "$([ -e "$X/plain/deep/pi-jail.conf" ] && echo 1 || echo 0)"
+check "config from a subdir leaves no conf in the cwd" "0" \
+	"$([ -e "$X/plain/deep/pi-jail.conf" ] && echo 1 || echo 0)"
+check "unadopted source resolves against invocation dir" "$X/plain/deep/.:/mnt" "$(conf "$X/plain" volumes)"
+# Both mutation modes must protect config before any jj snapshot, not only after init.
+(cd "$X/plain" && "$P" config add -v /tmp:/mnt/extra) >/dev/null 2>&1
+check "pre-init add succeeds" "0" "$?"
+check "pre-init config exclusion is idempotent" "1" "$(grep -cxF pi-jail.conf "$X/plain/.git/info/exclude")"
+cp "$X/plain/pi-jail.conf" "$X/plain-original.conf"
+status=$(cd "$X/plain" && jj status)
+check "pre-init snapshot succeeds" "0" "$?"
+check "pre-init snapshot does not report config" "0" "$(printf '%s\n' "$status" | grep -cF pi-jail.conf)"
+check "pre-init config remains untracked" "0" "$(cd "$X/plain" && jj file list | grep -cxF pi-jail.conf)"
+(cd "$X/plain" && "$P" init) >/dev/null 2>&1
+check "init after pre-init config succeeds" "0" "$?"
+check "init preserves pre-init config bytes" "0" "$(cmp -s "$X/plain-original.conf" "$X/plain/pi-jail.conf"; echo $?)"
+check "init does not duplicate pre-init exclusion" "1" "$(grep -cxF pi-jail.conf "$X/plain/.git/info/exclude")"
+(cd "$X/plain" && jj sparse set --clear --add .) >/dev/null 2>&1
+check "pre-init config leaves tracked gitignore unchanged" "0" \
+	"$(cmp -s "$X/plain-original.gitignore" "$X/plain/.gitignore"; echo $?)"
+check "pre-init config leaves no gitignore diff" "" "$(cd "$X/plain" && jj diff --types .gitignore)"
+
+# Each write mode protects new pre-init config independently; print is read-only.
+for mode in set add; do
+	R="$X/preinit-$mode"
+	mkrepo "$R"
+	cp "$R/.git/info/exclude" "$X/exclude-$mode.before"
+	(cd "$R" && "$P" config) >/dev/null 2>&1
+	check "pre-init print without config fails normally ($mode)" "1" "$?"
+	check "pre-init print does not change local exclusion ($mode)" "0" \
+		"$(cmp -s "$X/exclude-$mode.before" "$R/.git/info/exclude"; echo $?)"
+	(cd "$R" && "$P" config "$mode" -v "$R/missing:/mnt") >/dev/null 2>&1
+	check "pre-init $mode rejects missing source" "1" "$?"
+	check "pre-init invalid $mode does not change exclusion" "0" \
+		"$(cmp -s "$X/exclude-$mode.before" "$R/.git/info/exclude"; echo $?)"
+	check "pre-init invalid $mode does not create config" "0" "$([ -e "$R/pi-jail.conf" ] && echo 1 || echo 0)"
+	(cd "$R" && "$P" config "$mode" -v /tmp:/mnt) >/dev/null 2>&1
+	check "pre-init $mode creates config" "0" "$?"
+	(cd "$R" && jj status) >/dev/null 2>&1
+	check "pre-init $mode snapshot succeeds" "0" "$?"
+	check "pre-init $mode config untracked after snapshot" "0" "$(cd "$R" && jj file list | grep -cxF pi-jail.conf)"
+done
+
+# Without safe local excludes, mutations fail before writing; never invent .git.
+mkdir -p "$X/noncolocated/.jj/repo"
+for mode in set add; do
+	(cd "$X/noncolocated" && "$P" config "$mode" -v /tmp:/mnt) >"$X/native.out" 2>"$X/native.err"
+	check "noncolocated $mode fails" "1" "$?"
+	check "noncolocated $mode explains init prerequisite" "1" "$(grep -c 'run pj init' "$X/native.err")"
+	check "noncolocated $mode creates no config" "0" \
+		"$([ -e "$X/noncolocated/pi-jail.conf" ] && echo 1 || echo 0)"
+	check "noncolocated $mode creates no git dir" "0" "$([ -e "$X/noncolocated/.git" ] && echo 1 || echo 0)"
+	check "noncolocated $mode creates no config temp file" "0" \
+		"$([ -e "$X/noncolocated/.pi-jail.conf.tmp" ] && echo 1 || echo 0)"
+done
+printf '[volumes]\n/tmp:/mnt\n' >"$X/noncolocated/pi-jail.conf"
+cp "$X/noncolocated/pi-jail.conf" "$X/noncolocated-original.conf"
+r=$(cd "$X/noncolocated" && "$P" config)
+check "noncolocated print still succeeds" "0" "$?"
+check "noncolocated print returns config" "/tmp:/mnt" "$r"
+check "noncolocated print creates no git dir" "0" "$([ -e "$X/noncolocated/.git" ] && echo 1 || echo 0)"
+for mode in set add; do
+	(cd "$X/noncolocated" && "$P" config "$mode" -v /tmp:/other) >/dev/null 2>&1
+	check "noncolocated $mode with existing config fails" "1" "$?"
+	check "noncolocated $mode preserves existing config" "0" \
+		"$(cmp -s "$X/noncolocated-original.conf" "$X/noncolocated/pi-jail.conf"; echo $?)"
+done
 
 # --- workspace resolution is invocation-dir aware ----------------------------
 # given: pj open invoked from inside a workspace or from ws/
@@ -252,15 +380,22 @@ check "open ws/name from a workspace still resolves (name fallback)" \
 open_cwd "$T/cwd" .
 check "open . at the root dies (root is not a workspace)" "1" "$?"
 
-# --- pj drop removes the section ----------------------------------------------
+# --- pj drop owns only the workspace -----------------------------------------
 mkrepo "$T/c5"
 adopt "$T/c5"
+(cd "$T/c5" && jj workspace add --colocate ws/volumes) >/dev/null 2>&1
+printf '# keep\r\n[volumes]\r\n/tmp:/mnt\r\n[env]\r\nKEEP=value\r\n[path-prepend]\r\n/keep' \
+	>"$T/c5/pi-jail.conf"
+cp "$T/c5/pi-jail.conf" "$T/c5/original.conf"
+( cd "$T/c5" && "$P" drop --force volumes ) >/dev/null 2>&1
+check "drop volumes succeeds" "0" "$?"
+check "drop leaves entire config byte-for-byte" "0" "$(cmp -s "$T/c5/original.conf" "$T/c5/pi-jail.conf"; echo $?)"
+check "drop removes workspace" "0" "$([ -d "$T/c5/ws/volumes" ] && echo 1 || echo 0)"
+rm "$T/c5/pi-jail.conf"
 (cd "$T/c5" && jj workspace add --colocate ws/foo) >/dev/null 2>&1
-mkdir -p "$T/c5/a" "$T/c5/c"
-printf '[foo]\n%s/a:/b\n[bar]\n%s/c:/d\n' "$T/c5" "$T/c5" >"$T/c5/pi-jail.conf"
 ( cd "$T/c5" && "$P" drop --force foo ) >/dev/null 2>&1
-check "drop removes section" "" "$(conf "$T/c5" foo)"
-check "drop keeps other sections" "$T/c5/c:/d" "$(conf "$T/c5" bar)"
+check "drop without config succeeds" "0" "$?"
+check "drop creates no config" "0" "$([ -e "$T/c5/pi-jail.conf" ] && echo 1 || echo 0)"
 
 # --- root detection, adoption, graph shape (real jj) ---------------------------
 if command -v jj >/dev/null 2>&1; then
@@ -281,7 +416,9 @@ if command -v jj >/dev/null 2>&1; then
 	config='[env]
 PROJECT_TOKEN=host-owned
 [path-prepend]
-/home/project tools/bin'
+/home/project tools/bin
+[volumes]
+/tmp:/mnt/tmp'
 	printf '%s\n' "$config" >"$R/pi-jail.conf"
 	(cd "$R" && "$P" uninit) >/dev/null 2>&1
 	check "uninit with global config succeeds" "0" "$?"
@@ -307,7 +444,7 @@ PROJECT_TOKEN=host-owned
 	D=$R/inner
 	mkrepo "$D"
 	mkdir "$D/ws"
-	( cd "$D" && "$P" config set foo -v /tmp:/mnt ) >/dev/null 2>&1
+	( cd "$D" && "$P" config set -v /tmp:/mnt ) >/dev/null 2>&1
 	check "a full-checkout look-alike is not a root" "1" \
 		"$([ -f "$R/pi-jail.conf" ] && echo 1 || echo 0)"
 	check "no conf at the look-alike" "0" "$([ -e "$D/pi-jail.conf" ] && echo 1 || echo 0)"
@@ -419,7 +556,7 @@ literal='LITERAL= spaces = "quotes" $HOME $(touch env-payload) `touch env-backti
 printf '[env]\r\n# ignored\r\n\r\nEMPTY=\r\nEQUALS=a=b=c\r\n%s\r\nDUP=first\r\nDUP=last\r\n' \
 	"$literal" >"$T/env/pi-jail.conf"
 printf '[path-prepend]\r\n/container/not-on-host\r\n/container/with spaces\r\n' >>"$T/env/pi-jail.conf"
-printf '[foo]\n/tmp:/mnt/foo\n[bar]\n/tmp:/mnt/bar\n' >>"$T/env/pi-jail.conf"
+printf '[volumes]\r\n# shared mounts\r\n\r\n/tmp:/mnt/all\r\n/tmp:/mnt/last' >>"$T/env/pi-jail.conf"
 expected_env="--env-file
 $T/env/cfg/pi-jail/jail.env
 --env
@@ -441,7 +578,8 @@ for invocation in 'open foo' 'debug foo' 'open bar' 'debug bar'; do
 	project_pj "$command" "$workspace" >"$T/env/stdout" 2>&1
 	check "$invocation accepts global env and paths" "0" "$?"
 	check "$invocation env-file precedes literal ordered overrides" "$expected_env" "$(env_args)"
-	check "$invocation keeps workspace mounts" "/tmp:/mnt/$workspace" "$(vols "$out" | grep '/mnt/')"
+	check "$invocation shares ordered project mounts" "/tmp:/mnt/all
+/tmp:/mnt/last" "$(vols "$out" | grep '/mnt/')"
 done
 check "config payloads never execute" "1" \
 	"$([ ! -e "$T/env/env-payload" ] && [ ! -e "$T/env/env-backtick" ] && echo 1 || echo 0)"
@@ -450,7 +588,7 @@ check "project config not mounted" "0" "$(vols "$out" | grep -c 'pi-jail.conf')"
 # Given globals, mount edits must leave both sections alone.
 for edit_case in 'set 1' 'add 2'; do
 	read -r mode count <<<"$edit_case"
-	project_pj config "$mode" foo -v /tmp:/mnt/new >/dev/null 2>&1
+	project_pj config "$mode" -v /tmp:/mnt/new >/dev/null 2>&1
 	check "config $mode with globals succeeds" "0" "$?"
 	: >"$out"
 	project_pj open foo >/dev/null 2>&1
@@ -459,12 +597,13 @@ for edit_case in 'set 1' 'add 2'; do
 done
 rmdir "$T/env/ws/bar"
 (cd "$T/env" && jj workspace add --colocate ws/bar) >/dev/null 2>&1
+cp "$T/env/pi-jail.conf" "$T/env/original.conf"
 project_pj drop --force bar >/dev/null 2>&1
 check "drop with globals succeeds" "0" "$?"
 : >"$out"
 project_pj open foo >/dev/null 2>&1
 check "drop preserves globals" "$expected_env" "$(env_args)"
-check "drop removes only workspace section" "0" "$(grep -c '^\[bar\]' "$T/env/pi-jail.conf")"
+check "drop preserves all global config" "0" "$(cmp -s "$T/env/original.conf" "$T/env/pi-jail.conf"; echo $?)"
 
 # Given bad entries between valid entries, validation must fail before Podman.
 while IFS='|' read -r section bad diagnostic; do
@@ -502,7 +641,7 @@ path-prepend|:/two|colon
 INVALID
 
 # No globals still overrides a user env-file carrier with an empty value.
-printf '[foo]\n/tmp:/mnt/foo\n' >"$T/env/pi-jail.conf"
+printf '[volumes]\n/tmp:/mnt/all\n' >"$T/env/pi-jail.conf"
 : >"$out"
 project_pj open foo >/dev/null 2>&1
 check "missing path section sends empty carrier" "--env-file
@@ -510,26 +649,28 @@ $T/env/cfg/pi-jail/jail.env
 --env
 PI_JAIL_PATH_PREPEND=" "$(env_args)"
 
-# Central workspace-name validation protects global sections from every command.
-printf '[env]\nKEEP=value\n[path-prepend]\n/keep\n' >"$T/env/pi-jail.conf"
+# Section names are ordinary workspace names; config is independent of them.
+printf '[env]\nKEEP=value\n[path-prepend]\n/keep\n[volumes]\n/tmp:/mnt/all\n' >"$T/env/pi-jail.conf"
 cp "$T/env/pi-jail.conf" "$T/env/original.conf"
-for reserved in env path-prepend; do
-	for command in print set add drop new open debug fill; do
-		case $command in
-		print) args=(config "$reserved") ;;
-		set | add) args=(config "$command" "ws/$reserved" -v /tmp:/mnt) ;;
-		drop) args=(drop --force "$reserved") ;;
-		new | open | debug | fill) args=("$command" "$reserved") ;;
-		esac
+for workspace in env path-prepend volumes; do
+	project_pj new "$workspace" >/dev/null 2>&1
+	check "new accepts workspace $workspace" "0" "$?"
+	project_pj fill "$workspace" >/dev/null 2>&1
+	check "fill accepts workspace $workspace" "0" "$?"
+	for command in open debug; do
 		: >"$out"
-		project_pj "${args[@]}" >"$T/env/stdout" 2>"$T/env/stderr"
-		check "$command rejects reserved workspace $reserved" "1" "$?"
-		check "$command never opens reserved workspace $reserved" "0" "$(wc -l <"$out")"
-		check "$command explains reserved workspace $reserved" "1" \
-			"$(grep -c "reserved.*$reserved" "$T/env/stderr")"
+		project_pj "$command" "$workspace" >"$T/env/stdout" 2>"$T/env/stderr"
+		check "$command accepts workspace $workspace" "0" "$?"
+		check "$command $workspace keeps project volumes" "/tmp:/mnt/all" "$(vols "$out" | grep '/mnt/')"
+		check "$command $workspace keeps global env" "KEEP=value" "$(env_args | grep '^KEEP=')"
+		check "$command $workspace keeps global paths" "PI_JAIL_PATH_PREPEND=/keep" \
+			"$(env_args | grep '^PI_JAIL_PATH_PREPEND=')"
 	done
+	project_pj drop --force "$workspace" >/dev/null 2>&1
+	check "drop accepts workspace $workspace" "0" "$?"
+	check "drop $workspace leaves config intact" "0" \
+		"$(cmp -s "$T/env/original.conf" "$T/env/pi-jail.conf"; echo $?)"
 done
-check "reserved operations preserve config" "0" "$(cmp -s "$T/env/original.conf" "$T/env/pi-jail.conf"; echo $?)"
 
 echo
 echo "passed: $pass, failed: $fail"

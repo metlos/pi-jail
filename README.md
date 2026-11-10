@@ -48,11 +48,10 @@ workspace, and from `ws/`, `pj open mytask` resolves the same as from the root.
   it
 - `pj fill <name>` - symlink new `shared/project` entries into a workspace
 - `pj drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
-  overrides; the working copy is snapshotted into a commit before removal either way). Also removes the workspace's
-  extra-mount config (see [Extra mounts](#extra-mounts))
-- `pj config <name>` - print the workspace's extra mounts
-- `pj config set <name> -v <src>:<dst>[:<opts>]...` - replace the workspace's extra mounts
-- `pj config add <name> -v <src>:<dst>[:<opts>]...` - add extra mounts to the workspace
+  overrides; the working copy is snapshotted into a commit before removal either way). Does not remove project config.
+- `pj config` - print project-wide volumes
+- `pj config set -v <src>:<dst>[:<opts>]...` - replace project-wide volumes
+- `pj config add -v <src>:<dst>[:<opts>]...` - append project-wide volumes
 - `pj uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
   workspaces' landed work (merged when several diverged); refuses while any workspace has unlanded work (`--force`
   overrides; the working copies are snapshotted and kept either way). `shared/` is left behind - `rm -rf shared` once
@@ -73,13 +72,14 @@ Every relative reference from the worktree - its `.jj`/`.git` pointers, the shar
 the host, so jj, git and the shared entries all work inside the jail. The jail boundary is one workspace plus the
 repository: the agent can read and write its own working copy and every commit (all workspaces share one repository, so
 landed work of other workspaces is visible by design), but never sees other workspaces' working copies, the repo root,
-or anything outside the project - except the workspace's [extra mounts](#extra-mounts), if any.
+or anything outside the project - except [project-wide volumes](#project-volumes), if any; those are mounted into every
+workspace jail.
 
 The host's jj/git user config (`~/.config/jj`, `~/.gitconfig`, `~/.config/git`, whichever exist) is mounted into the
 jail read-only, so jj and git run with the usual identity, aliases and ignores inside - the jail home is per-project and
 would otherwise leave them unconfigured. Includes stored inside those dirs work; includes pointing elsewhere do not (git
-silently ignores them, jj errors out) - mount such dirs via [extra mounts](#extra-mounts) if needed. Signing keys never
-enter the jail: if your config signs commits, shadow it with repo-local config
+silently ignores them, jj errors out) - mount such dirs via [project-wide volumes](#project-volumes) if needed. Signing
+keys never enter the jail: if your config signs commits, shadow it with repo-local config
 (`git config --file .git/config commit.gpgsign false`, `jj config set --repo signing.behavior drop`, both set on the
 host) and sign when landing work to main on the host - keep signing last, an in-jail rewrite of a signed commit drops
 its signature.
@@ -87,31 +87,31 @@ its signature.
 Requires rootless podman (`--userns=keep-id` maps your uid into the container) and SELinux relabeling of the mounted
 trees (`:z`). Needs jj >= 0.46 (colocated workspaces) and git >= 2.42.
 
-## Extra mounts
+## Project volumes
 
-A workspace can get additional host directories mounted into the jail - useful when it needs access to files outside the
-project (a reference repo, datasets, a tool cache). The mounts are persisted per workspace in `pi-jail.conf` at the repo
-root (git-excluded, not mounted into the jail itself, so the agent cannot edit its own mount config):
+Project-wide host directories can be mounted into every workspace jail - useful for shared reference repos, datasets, or
+a tool cache. The list is persisted in host-owned `pi-jail.conf` at the repo root (locally excluded from VCS and not
+mounted into the jail, so the agent cannot edit its own config):
 
 ```
-pj config set mytask -v ~/refs/big-monorepo:/refs:ro -v ~/.cache/pip:/cache
+pj config set -v ~/refs/big-monorepo:/refs:ro -v ~/.cache/pip:/cache
 pj open mytask
 ```
 
-Each `-v` takes a podman volume spec `<src>:<dst>[:<opts>]`; `pj config add` appends, `pj config <name>` prints.
-`pj open` and `pj debug` both pick the mounts up and announce them on startup. The extra mounts are appended after the
-fixed project mounts, so they can shadow them (`/home`, `/work/...`); hand-edits to the file are allowed too - one spec
-per line under a `[<workspace>]` header, `#` comments and blank lines are skipped.
+Each `-v` takes a Podman volume spec `<src>:<dst>[:<opts>]`. `pj config` prints the list, `pj config set` replaces it,
+and `pj config add` appends to it. `pj open` and `pj debug` mount the volumes in every workspace and announce them on
+startup. Volume sources must exist; relative CLI source paths resolve from the invocation directory. Options such as
+`ro` and `:z` are preserved. Volumes follow fixed project mounts in listed order, so they can shadow them (including
+`/home` and `/work/...`).
 
-Bind sources must exist when the workspace starts (podman would otherwise auto-create them as root-owned junk on the
-host; `pj config` rejects them at write time). `:z` is not added automatically - it persistently relabels the host
-directory, so opting in is your call (add it to the spec when SELinux enforcing blocks the access).
+The `[volumes]` section uses one `<src>:<dst>[:<opts>]` volume spec per line; `#` comments and blank lines are skipped.
+`:z` is not added automatically and persistently relabels the host directory, so add it only when SELinux enforcing
+blocks access.
 
 ## Project environment
 
-The same host-owned `pi-jail.conf` supports project-wide `[env]` and `[path-prepend]` sections, shared by `pj open` and
-`pj debug`. `[<workspace>]` sections remain workspace-specific for extra mounts; `env` and `path-prepend` are reserved
-workspace names. For example:
+The same host-owned `pi-jail.conf` supports project-wide `[env]`, `[path-prepend]`, and `[volumes]` sections, shared by
+`pj open` and `pj debug`. For example:
 
 ```
 [env]
@@ -122,7 +122,7 @@ JAVA_HOME=/home/tools/jdk
 /home/tools/jdk/bin
 /home/.local/bin
 
-[mytask]
+[volumes]
 /host/data:/data:ro,z
 ```
 

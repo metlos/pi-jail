@@ -5,7 +5,7 @@
 #   shared/home     jail home, mounted at /home by pj open/debug
 #   shared/project  filled into workspaces via symlinks
 #   ws/<name>       colocated jj workspaces
-#   pi-jail.conf    untracked project env/PATH and workspace extra mounts
+#   pi-jail.conf    untracked project env/PATH and extra mounts
 #
 # Needs jj >= 0.46 (colocated workspaces, jj workspace remove).
 set -euo pipefail
@@ -15,11 +15,11 @@ usage() {
 	echo "       pj new <ws/name>            create workspace ws/<name> and fill it from shared/project" >&2
 	echo "       pj fill <ws/name>           fill ws/<name> with new shared/project entries" >&2
 	echo "       pj drop [--force] <ws/name>  remove workspace (refuses on unlanded working copy)" >&2
-	echo "       pj config <ws/name>         print the workspace's extra mounts (pi-jail.conf)" >&2
-	echo "       pj config set <ws/name> -v <src>:<dst>[:opts]..." >&2
-	echo "                                    replace the workspace's extra mounts" >&2
-	echo "       pj config add <ws/name> -v <src>:<dst>[:opts]..." >&2
-	echo "                                    add extra mounts to the workspace" >&2
+	echo "       pj config                   print the project's extra mounts (pi-jail.conf [volumes])" >&2
+	echo "       pj config set -v <src>:<dst>[:opts]..." >&2
+	echo "                                    replace the project's extra mounts" >&2
+	echo "       pj config add -v <src>:<dst>[:opts]..." >&2
+	echo "                                    add extra mounts to the project" >&2
 	echo "       pj uninit [--force]         remove workspaces, restore full checkout at repo root" >&2
 	echo "       pj open <ws/name> [args...] run the pi coding agent in the workspace's jail" >&2
 	echo "       pj debug <ws/name>          start a shell in the workspace's jail" >&2
@@ -82,8 +82,7 @@ cd_root() {
 #     workspace is the first path component below ws/ - so "pj open ."
 #     inside ws/<name> opens that workspace. The name form always wins:
 #     a workspace named like a dir is never shadowed.
-# A name is valid only if it can never be mistaken for a pi-jail.conf
-# section header line.
+# Names must be single safe path components.
 ws_name() { # ws_name ARG
 	local name=
 	case $1 in
@@ -105,7 +104,6 @@ ws_name() { # ws_name ARG
 	esac
 	case $name in
 	"" | . | .. | \[* | *\]* | */*) die "bad workspace: $1" ;;
-	env | path-prepend) die "reserved workspace name: $name (pi-jail.conf global section)" ;;
 	esac
 	echo "$name"
 }
@@ -165,12 +163,13 @@ section_lines() { # section_lines NAME
 		*) [ "$in_section" -eq 1 ] && printf '%s\n' "$line" ;;
 		esac
 	done <pi-jail.conf
+	return 0
 }
 
 # Rewrite pi-jail.conf with the section's lines replaced by "$@" (or removed
 # when none). Other sections, comments and blank lines are preserved as-is;
-# a section that did not exist is appended at the end. No-op without a write
-# when the file does not exist (drop must not create one).
+# a section that did not exist is appended at the end. Repeated headers are
+# consolidated at the first occurrence; comments keep their relative order.
 write_section() { # write_section NAME [LINES...]
 	local name=$1
 	shift
@@ -183,16 +182,18 @@ write_section() { # write_section NAME [LINES...]
 			line=${line%$'\r'}
 			case $line in
 			"[$name]")
-				in_section=1 found=1
-				if [ $# -gt 0 ]; then # rewrite in place: header + new lines
+				in_section=1
+				if [ "$found" -eq 0 ] && [ $# -gt 0 ]; then
 					printf '[%s]\n' "$name" >>"$tmp"
 					for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
 				fi
+				found=1
 				;;
 			\[*\])
 				in_section=0
 				printf '%s\n' "$line" >>"$tmp"
 				;;
+			'#'* | '') printf '%s\n' "$line" >>"$tmp" ;;
 			*)
 				[ "$in_section" -eq 1 ] || printf '%s\n' "$line" >>"$tmp"
 				;;
@@ -213,7 +214,7 @@ check_specs() { # check_specs SPECS...
 	local spec src
 	for spec in "$@"; do
 		src=${spec%%:*}
-		[ -e "$src" ] || die "config: no such host path: $src"
+		[ -e "$src" ] || die "pi-jail.conf [volumes]: no such host path: $src"
 	done
 }
 
@@ -300,32 +301,22 @@ cmd_drop() {
 	fi
 
 	jj workspace remove "$name"
-
-	# extra-mount config belongs to the workspace: a later pj new with the
-	# same name should not silently resurrect the old mounts
-	write_section "$name"
 }
 
 cmd_config() {
 	cd_root
-	local name mode
+	local mode
 	if [ "${1:-}" = set ] || [ "${1:-}" = add ]; then
 		mode=$1
 		shift
 	else
 		mode=print
 	fi
-	[ $# -ge 1 ] || usage
-	name=$(ws_name "$1")
-	shift
-	# the global $inv (invocation dir) resolves relative -v srcs; cd_root
-	# and ws_name have already cd'ed us to the project root
-
 	if [ "$mode" = print ]; then
 		[ $# -eq 0 ] || usage
 		local lines
-		lines=$(section_lines "$name")
-		[ -n "$lines" ] || die "no config for workspace: $name"
+		lines=$(section_lines volumes)
+		[ -n "$lines" ] || die "no project volumes in pi-jail.conf [volumes]"
 		printf '%s\n' "$lines"
 		return
 	fi
@@ -340,7 +331,7 @@ cmd_config() {
 			;;
 		--) shift; break ;;
 		-*) usage ;;
-		*) usage ;; # name comes first; anything else is a usage error
+		*) usage ;;
 		esac
 	done
 	[ $# -eq 0 ] || usage
@@ -354,14 +345,18 @@ cmd_config() {
 		*) specs[i]="$inv/$src:${spec#*:}" ;;
 		esac
 	done
-	check_specs "${specs[@]}"
-
 	if [ "$mode" = add ]; then # existing lines first, then the new ones
 		declare -a existing=()
-		while IFS= read -r line; do existing+=("$line"); done < <(section_lines "$name")
+		while IFS= read -r line; do existing+=("$line"); done < <(section_lines volumes)
 		specs=("${existing[@]}" "${specs[@]}")
 	fi
-	write_section "$name" "${specs[@]}"
+	check_specs "${specs[@]}"
+	# Protect host-owned config from jj snapshots, even before init.
+	[ -d .git/info ] || die "cannot locally exclude pi-jail.conf; run pj init first"
+	if ! grep -qxF pi-jail.conf .git/info/exclude 2>/dev/null; then
+		printf '\npi-jail.conf\n' >>.git/info/exclude || die "cannot locally exclude pi-jail.conf; run pj init first"
+	fi
+	write_section volumes "${specs[@]}"
 }
 
 # Reverse of init: remove the workspaces, restore a plain full checkout at
@@ -485,34 +480,14 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 
 	ws_ensure_full "$name"
 
-	# extra mounts for this workspace: pi-jail.conf [<name>] section at the
-	# repo root, one podman -v spec per line. Appended after the fixed mounts
-	# below, so they can shadow them. Validated here because hand-edits
-	# bypass pj config; a missing src would otherwise make podman auto-create
-	# root-owned junk on the host. The conf stays outside the jail.
+	# Project mounts follow fixed mounts so they can shadow them. Validate in
+	# this shell: hand-edited missing sources must fail before Podman runs.
+	# The host-owned config stays outside the jail.
 	declare -a extra_vols=()
-	if [ -f pi-jail.conf ]; then
-		local in_section=0 line
-		while IFS= read -r line || [ -n "$line" ]; do
-			line=${line%$'\r'}
-			case $line in
-			"[$name]") in_section=1 ;;
-			\[*\]) in_section=0 ;;
-			'#'*) ;;
-			'') ;;
-			*)
-				if [ "$in_section" -eq 1 ]; then
-					local src=${line%%:*}
-					[ -e "$src" ] || {
-						echo "pj: pi-jail.conf [$name]: no such host path: $src" >&2
-						exit 1
-					}
-					extra_vols+=("-v" "$line")
-				fi
-				;;
-			esac
-		done <pi-jail.conf
-	fi
+	while IFS= read -r line; do
+		check_specs "$line"
+		extra_vols+=("-v" "$line")
+	done < <(section_lines volumes)
 
 	# host VCS user config, read-only: the jail home is per-project, so without
 	# this jj/git run unconfigured inside (no identity, no aliases, no ignores).

@@ -1,4 +1,4 @@
-# extra-mount config written by pctl config / hand-edited per workspace
+# project-wide jail config written by pj config / hand-edited
 pi-jail.conf
 
 # smoke test scratch
