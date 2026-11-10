@@ -85,7 +85,7 @@ cd_root() {
 # A name is valid only if it can never be mistaken for a pi-jail.conf
 # section header line.
 ws_name() { # ws_name ARG
-	local name
+	local name=
 	case $1 in
 	. | .. | ./* | ../* | */*)
 		local dir

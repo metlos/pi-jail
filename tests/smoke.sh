@@ -246,6 +246,7 @@ open_cwd "$T/cwd/ws/bar" .
 check "open . in another workspace mounts that one" "$T/cwd/ws/bar:/work/ws/bar:z" \
 	"$(vols "$out" | grep -m1 '/work/ws/bar:z')"
 open_cwd "$T/cwd/ws/bar" ws/foo
+check "open ws/name from a workspace exits 0 (name fallback)" "0" "$?"
 check "open ws/name from a workspace still resolves (name fallback)" \
 	"$T/cwd/ws/foo:/work/ws/foo:z" "$(vols "$out" | grep -m1 '/work/ws/foo:z')"
 open_cwd "$T/cwd" .
@@ -287,6 +288,18 @@ if command -v jj >/dev/null 2>&1; then
 	check "a full-checkout look-alike is not a root" "1" \
 		"$([ -f "$R/pi-jail.conf" ] && echo 1 || echo 0)"
 	check "no conf at the look-alike" "0" "$([ -e "$D/pi-jail.conf" ] && echo 1 || echo 0)"
+
+	# given: an adopted repo
+	# when: a workspace is created with the ws/name argument form (path-shaped
+	# arg whose path resolution misses; ws_name falls back to the name form)
+	# then: it succeeds instead of tripping set -u on the unassigned local
+	R=$T/newform
+	mkrepo "$R"
+	adopt "$R"
+	(cd "$R" && "$P" new ws/task1) >/dev/null 2>&1
+	check "new accepts the ws/name form" "0" "$?"
+	check "new ws/name creates the workspace" "1" \
+		"$([ -d "$R/ws/task1" ] && echo 1 || echo 0)"
 
 	# given: an adopted repo whose root @ is the usual vacuous placeholder
 	# (empty, no description) on top of described history
