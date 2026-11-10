@@ -270,10 +270,33 @@ if command -v jj >/dev/null 2>&1; then
 	# then: the root is narrowed and the layout dirs exist
 	R=$X/init
 	mkrepo "$R"
+	printf 'project-cache/\n' >"$R/.gitignore"
+	(cd "$R" && jj commit -m 'Project ignore baseline') >/dev/null 2>&1
 	(cd "$R" && "$P" init) >/dev/null 2>&1
 	check "init narrows the root" "ws" "$(cd "$R" && jj sparse list)"
 	check "init creates the layout" "1" \
 		"$([ -d "$R/ws" ] && [ -d "$R/shared" ] && echo 1 || echo 0)"
+
+	# Given host-owned global config, uninit must retain it outside VCS snapshots.
+	config='[env]
+PROJECT_TOKEN=host-owned
+[path-prepend]
+/home/project tools/bin'
+	printf '%s\n' "$config" >"$R/pi-jail.conf"
+	(cd "$R" && "$P" uninit) >/dev/null 2>&1
+	check "uninit with global config succeeds" "0" "$?"
+	check "uninit preserves global config contents" "$config" "$(<"$R/pi-jail.conf")"
+	check "uninit retains config exclusion" "1" "$(grep -cxF pi-jail.conf "$R/.git/info/exclude")"
+	check "uninit still removes ws exclusion" "0" "$(grep -cxF ws/ "$R/.git/info/exclude")"
+	check "uninit still removes shared exclusion" "0" "$(grep -cxF shared/ "$R/.git/info/exclude")"
+	status=$(cd "$R" && jj status)
+	check "next snapshot after uninit succeeds" "0" "$?"
+	check "next snapshot does not add config to status" "0" "$(printf '%s\n' "$status" | grep -cF pi-jail.conf)"
+	files=$(cd "$R" && jj file list)
+	check "file list after uninit succeeds" "0" "$?"
+	check "global config stays untracked after snapshot" "0" "$(printf '%s\n' "$files" | grep -cxF pi-jail.conf)"
+	check "uninit leaves project gitignore contents unchanged" "project-cache/" "$(<"$R/.gitignore")"
+	check "uninit leaves no tracked gitignore changes" "" "$(cd "$R" && jj diff --types .gitignore)"
 
 	# given: a full-checkout repo with a ws/ dir nested in an adopted root
 	# when: config is set from inside it
@@ -376,6 +399,137 @@ if command -v jj >/dev/null 2>&1; then
 	check "open rematerializes the files" "1" \
 		"$([ -f "$R/ws/task1/base" ] && echo 1 || echo 0)"
 fi
+
+# --- project-wide env and PATH: literal data, shared by every jail -----------
+out="$T/env.out"
+mkproj "$T/env" "$out"
+mkdir -p "$T/env/ws/bar"
+project_pj() {
+	( cd "$T/env" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$P" "$@" )
+}
+# Extract actual argument pairs, not substrings that could hide ordering bugs.
+env_args() {
+	local arg previous=
+	while IFS= read -r arg; do
+		case $previous in --env | --env-file) printf '%s\n%s\n' "$previous" "$arg" ;; esac
+		previous=$arg
+	done <"$out"
+}
+literal='LITERAL= spaces = "quotes" $HOME $(touch env-payload) `touch env-backtick` '
+printf '[env]\r\n# ignored\r\n\r\nEMPTY=\r\nEQUALS=a=b=c\r\n%s\r\nDUP=first\r\nDUP=last\r\n' \
+	"$literal" >"$T/env/pi-jail.conf"
+printf '[path-prepend]\r\n/container/not-on-host\r\n/container/with spaces\r\n' >>"$T/env/pi-jail.conf"
+printf '[foo]\n/tmp:/mnt/foo\n[bar]\n/tmp:/mnt/bar\n' >>"$T/env/pi-jail.conf"
+expected_env="--env-file
+$T/env/cfg/pi-jail/jail.env
+--env
+EMPTY=
+--env
+EQUALS=a=b=c
+--env
+$literal
+--env
+DUP=first
+--env
+DUP=last
+--env
+PI_JAIL_PATH_PREPEND=/container/not-on-host:/container/with spaces"
+printf 'DUP=user\nPI_JAIL_PATH_PREPEND=/hijack\n' >"$T/env/cfg/pi-jail/jail.env"
+for invocation in 'open foo' 'debug foo' 'open bar' 'debug bar'; do
+	: >"$out"
+	read -r command workspace <<<"$invocation"
+	project_pj "$command" "$workspace" >"$T/env/stdout" 2>&1
+	check "$invocation accepts global env and paths" "0" "$?"
+	check "$invocation env-file precedes literal ordered overrides" "$expected_env" "$(env_args)"
+	check "$invocation keeps workspace mounts" "/tmp:/mnt/$workspace" "$(vols "$out" | grep '/mnt/')"
+done
+check "config payloads never execute" "1" \
+	"$([ ! -e "$T/env/env-payload" ] && [ ! -e "$T/env/env-backtick" ] && echo 1 || echo 0)"
+check "project config not mounted" "0" "$(vols "$out" | grep -c 'pi-jail.conf')"
+
+# Given globals, mount edits must leave both sections alone.
+for edit_case in 'set 1' 'add 2'; do
+	read -r mode count <<<"$edit_case"
+	project_pj config "$mode" foo -v /tmp:/mnt/new >/dev/null 2>&1
+	check "config $mode with globals succeeds" "0" "$?"
+	: >"$out"
+	project_pj open foo >/dev/null 2>&1
+	check "config $mode preserves globals" "$expected_env" "$(env_args)"
+	check "config $mode retains mount semantics" "$count" "$(vols "$out" | grep -c '/mnt/new')"
+done
+rmdir "$T/env/ws/bar"
+(cd "$T/env" && jj workspace add --colocate ws/bar) >/dev/null 2>&1
+project_pj drop --force bar >/dev/null 2>&1
+check "drop with globals succeeds" "0" "$?"
+: >"$out"
+project_pj open foo >/dev/null 2>&1
+check "drop preserves globals" "$expected_env" "$(env_args)"
+check "drop removes only workspace section" "0" "$(grep -c '^\[bar\]' "$T/env/pi-jail.conf")"
+
+# Given bad entries between valid entries, validation must fail before Podman.
+while IFS='|' read -r section bad diagnostic; do
+	printf '[%s]\n' "$section" >"$T/env/pi-jail.conf"
+	if [ "$section" = env ]; then
+		printf 'VALID=before\n%s\nAFTER=after\n' "$bad" >>"$T/env/pi-jail.conf"
+	else
+		printf '/valid\n%s\n/after\n' "$bad" >>"$T/env/pi-jail.conf"
+	fi
+	: >"$out"
+	project_pj open foo >"$T/env/stdout" 2>"$T/env/stderr"
+	check "[$section] rejects $bad" "1" "$?"
+	check "[$section] $bad never invokes Podman" "0" "$(wc -l <"$out")"
+	check "[$section] diagnostic names section" "1" "$(grep -Fc "[$section]" "$T/env/stderr")"
+	check "[$section] diagnostic names entry" "1" "$(grep -Fc "$bad" "$T/env/stderr")"
+	check "[$section] helpful diagnostic for $bad" "1" "$(grep -Fc "$diagnostic" "$T/env/stderr")"
+done <<'INVALID'
+env|NO_EQUALS|assignment
+env|1BAD=value|name
+env|BAD-NAME=value|name
+env|BAD NAME=value|name
+env|=value|name
+env|PATH=/replacement|[path-prepend]
+env|PI_JAIL_PATH_PREPEND=/hijack|reserved
+env|[BROKEN|assignment
+env|[env]junk|assignment
+path-prepend|[BROKEN|absolute
+path-prepend|[env]junk|absolute
+path-prepend|relative/bin|absolute
+path-prepend|~/bin|absolute
+path-prepend|$HOME/bin|absolute
+path-prepend|/one:/two|colon
+path-prepend|/one:|colon
+path-prepend|:/two|colon
+INVALID
+
+# No globals still overrides a user env-file carrier with an empty value.
+printf '[foo]\n/tmp:/mnt/foo\n' >"$T/env/pi-jail.conf"
+: >"$out"
+project_pj open foo >/dev/null 2>&1
+check "missing path section sends empty carrier" "--env-file
+$T/env/cfg/pi-jail/jail.env
+--env
+PI_JAIL_PATH_PREPEND=" "$(env_args)"
+
+# Central workspace-name validation protects global sections from every command.
+printf '[env]\nKEEP=value\n[path-prepend]\n/keep\n' >"$T/env/pi-jail.conf"
+cp "$T/env/pi-jail.conf" "$T/env/original.conf"
+for reserved in env path-prepend; do
+	for command in print set add drop new open debug fill; do
+		case $command in
+		print) args=(config "$reserved") ;;
+		set | add) args=(config "$command" "ws/$reserved" -v /tmp:/mnt) ;;
+		drop) args=(drop --force "$reserved") ;;
+		new | open | debug | fill) args=("$command" "$reserved") ;;
+		esac
+		: >"$out"
+		project_pj "${args[@]}" >"$T/env/stdout" 2>"$T/env/stderr"
+		check "$command rejects reserved workspace $reserved" "1" "$?"
+		check "$command never opens reserved workspace $reserved" "0" "$(wc -l <"$out")"
+		check "$command explains reserved workspace $reserved" "1" \
+			"$(grep -c "reserved.*$reserved" "$T/env/stderr")"
+	done
+done
+check "reserved operations preserve config" "0" "$(cmp -s "$T/env/original.conf" "$T/env/pi-jail.conf"; echo $?)"
 
 echo
 echo "passed: $pass, failed: $fail"

@@ -56,7 +56,7 @@ workspace, and from `ws/`, `pj open mytask` resolves the same as from the root.
 - `pj uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
   workspaces' landed work (merged when several diverged); refuses while any workspace has unlanded work (`--force`
   overrides; the working copies are snapshotted and kept either way). `shared/` is left behind - `rm -rf shared` once
-  you no longer need the jail home and the shared entries
+  you no longer need the jail home and the shared entries. `pi-jail.conf` is kept and remains locally excluded from VCS
 - `pj open <name> [args...]` - run the pi coding agent in the workspace's jail
 - `pj debug <name>` - start a shell in the workspace's jail
 
@@ -75,11 +75,11 @@ repository: the agent can read and write its own working copy and every commit (
 landed work of other workspaces is visible by design), but never sees other workspaces' working copies, the repo root,
 or anything outside the project - except the workspace's [extra mounts](#extra-mounts), if any.
 
-The host's jj/git user config (`~/.config/jj`, `~/.gitconfig`, `~/.config/git`, whichever exist) is mounted into the jail
-read-only, so jj and git run with the usual identity, aliases and ignores inside - the jail home is per-project and
-would otherwise leave them unconfigured. Includes stored inside those dirs work; includes pointing elsewhere do not
-(git silently ignores them, jj errors out) - mount such dirs via [extra mounts](#extra-mounts) if needed. Signing keys
-never enter the jail: if your config signs commits, shadow it with repo-local config
+The host's jj/git user config (`~/.config/jj`, `~/.gitconfig`, `~/.config/git`, whichever exist) is mounted into the
+jail read-only, so jj and git run with the usual identity, aliases and ignores inside - the jail home is per-project and
+would otherwise leave them unconfigured. Includes stored inside those dirs work; includes pointing elsewhere do not (git
+silently ignores them, jj errors out) - mount such dirs via [extra mounts](#extra-mounts) if needed. Signing keys never
+enter the jail: if your config signs commits, shadow it with repo-local config
 (`git config --file .git/config commit.gpgsign false`, `jj config set --repo signing.behavior drop`, both set on the
 host) and sign when landing work to main on the host - keep signing last, an in-jail rewrite of a signed commit drops
 its signature.
@@ -106,6 +106,35 @@ per line under a `[<workspace>]` header, `#` comments and blank lines are skippe
 Bind sources must exist when the workspace starts (podman would otherwise auto-create them as root-owned junk on the
 host; `pj config` rejects them at write time). `:z` is not added automatically - it persistently relabels the host
 directory, so opting in is your call (add it to the spec when SELinux enforcing blocks the access).
+
+## Project environment
+
+The same host-owned `pi-jail.conf` supports project-wide `[env]` and `[path-prepend]` sections, shared by `pj open` and
+`pj debug`. `[<workspace>]` sections remain workspace-specific for extra mounts; `env` and `path-prepend` are reserved
+workspace names. For example:
+
+```
+[env]
+GOTOOLCHAIN=auto
+JAVA_HOME=/home/tools/jdk
+
+[path-prepend]
+/home/tools/jdk/bin
+/home/.local/bin
+
+[mytask]
+/host/data:/data:ro,z
+```
+
+Environment names must match `[A-Za-z_][A-Za-z0-9_]*`; `PI_JAIL_PATH_PREPEND` is reserved for internal use. Environment
+values are literal: no quote removal, interpolation, or evaluation (`$HOME` and `~` stay literal). Empty values and
+embedded `=` are allowed; project values override same-name entries from `~/.config/pi-jail/jail.env`, and the last
+duplicate `NAME` wins. Set `PATH` with `[path-prepend]`, not `[env]`: list absolute container directories, one per line,
+without `:`. Earlier entries take precedence, followed by the image's existing `PATH`; directories may not exist in the
+jail yet.
+
+Keep `pi-jail.conf` untracked, host-owned, and outside the jail; keep pi-jail-specific setup/instructions out of
+downstream VCS. Keep user-wide `~/.config/pi-jail/jail.env` for gateway virtual keys.
 
 ## Person configuration
 

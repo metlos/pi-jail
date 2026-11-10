@@ -5,7 +5,7 @@
 #   shared/home     jail home, mounted at /home by pj open/debug
 #   shared/project  filled into workspaces via symlinks
 #   ws/<name>       colocated jj workspaces
-#   pi-jail.conf    untracked extra-mount config, [<ws>] sections of -v specs
+#   pi-jail.conf    untracked project env/PATH and workspace extra mounts
 #
 # Needs jj >= 0.46 (colocated workspaces, jj workspace remove).
 set -euo pipefail
@@ -105,6 +105,7 @@ ws_name() { # ws_name ARG
 	esac
 	case $name in
 	"" | . | .. | \[* | *\]* | */*) die "bad workspace: $1" ;;
+	env | path-prepend) die "reserved workspace name: $name (pi-jail.conf global section)" ;;
 	esac
 	echo "$name"
 }
@@ -149,8 +150,8 @@ ws_ensure_full() { # ws_ensure_full NAME
 	fi
 }
 
-# One podman -v spec per line under [<name>] in pi-jail.conf. Comments and
-# blank lines are skipped. Empty output = no section / no mounts.
+# Lines under [NAME] in pi-jail.conf; comments and blank lines are skipped.
+# Empty output = no section / no entries.
 section_lines() { # section_lines NAME
 	[ -f pi-jail.conf ] || return 0
 	local in_section=0 line
@@ -158,7 +159,7 @@ section_lines() { # section_lines NAME
 		line=${line%$'\r'}
 		case $line in
 		"[$1]") in_section=1 ;;
-		\[*) in_section=0 ;;
+		\[*\]) in_section=0 ;;
 		'#'*) ;;
 		'') ;;
 		*) [ "$in_section" -eq 1 ] && printf '%s\n' "$line" ;;
@@ -188,7 +189,7 @@ write_section() { # write_section NAME [LINES...]
 					for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
 				fi
 				;;
-			\[*)
+			\[*\])
 				in_section=0
 				printf '%s\n' "$line" >>"$tmp"
 				;;
@@ -276,7 +277,9 @@ cmd_new() {
 cmd_fill() {
 	[ $# -eq 1 ] || usage
 	cd_root
-	fill_shared "$(ws_name "$1")"
+	local name
+	name=$(ws_name "$1")
+	fill_shared "$name"
 }
 
 cmd_drop() {
@@ -402,8 +405,8 @@ cmd_uninit() {
 	# rematerialize the project files at the repo root
 	jj sparse set --clear --add .
 
-	# unhide layout dirs from colocated git; info/exclude is local-only
-	for pat in ws/ shared/ pi-jail.conf; do
+	# Unhide layout dirs, but keep the host-owned config excluded while left behind.
+	for pat in ws/ shared/; do
 		[ -f .git/info/exclude ] || continue
 		grep -vx "$pat" .git/info/exclude >.git/info/exclude.tmp || true
 		mv .git/info/exclude.tmp .git/info/exclude
@@ -424,7 +427,9 @@ cmd_open() {
 
 cmd_debug() {
 	cd_root
-	run_jail "$(ws_name "$1")" bash
+	local name
+	name=$(ws_name "$1")
+	run_jail "$name" bash
 }
 
 # Jail runner: NAME is the bare workspace name, the rest is the command line.
@@ -454,6 +459,30 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 		}
 	done
 
+	# Validate in this shell: errors in a process-substitution producer would be lost.
+	declare -a project_env=()
+	local line key prefix=
+	while IFS= read -r line; do
+		[[ $line == *=* ]] || die "pi-jail.conf [env]: expected NAME=value assignment: $line"
+		key=${line%%=*}
+		[[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "pi-jail.conf [env]: invalid env name: $line"
+		case $key in
+		PATH) die "pi-jail.conf [env]: use [path-prepend] to preserve container PATH: $line" ;;
+		PI_JAIL_PATH_PREPEND) die "pi-jail.conf [env]: reserved internal variable: $line" ;;
+		esac
+		project_env+=(--env "$line")
+	done < <(section_lines env)
+	while IFS= read -r line; do
+		case $line in
+		*:*) die "pi-jail.conf [path-prepend]: colon is not allowed in a directory: $line" ;;
+		/*) ;;
+		*) die "pi-jail.conf [path-prepend]: expected absolute container directory: $line" ;;
+		esac
+		prefix+="${prefix:+:}$line"
+	done < <(section_lines path-prepend)
+	# Always override jail.env so it cannot inject the internal carrier.
+	project_env+=(--env "PI_JAIL_PATH_PREPEND=$prefix")
+
 	ws_ensure_full "$name"
 
 	# extra mounts for this workspace: pi-jail.conf [<name>] section at the
@@ -468,7 +497,7 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 			line=${line%$'\r'}
 			case $line in
 			"[$name]") in_section=1 ;;
-			\[*) in_section=0 ;;
+			\[*\]) in_section=0 ;;
 			'#'*) ;;
 			'') ;;
 			*)
@@ -536,6 +565,7 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 		--network=pasta:--map-host-loopback,169.254.1.3 \
 		--add-host host.containers.internal:169.254.1.3 \
 		--env-file "$cfg/jail.env" \
+		"${project_env[@]}" \
 		-v "$cfg/models.json:/home/.pi/agent/models.json:ro,z" \
 		-v "$cfg/mcp.json:/home/.pi/agent/mcp.json:ro,z" \
 		"${vcs_vols[@]}" \
