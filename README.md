@@ -49,9 +49,11 @@ workspace, and from `ws/`, `pj open mytask` resolves the same as from the root.
 - `pj fill <name>` - symlink new `shared/project` entries into a workspace
 - `pj drop [--force] <name>` - remove a workspace; refuses while it has unlanded work in its working copy (`--force`
   overrides; the working copy is snapshotted into a commit before removal either way). Does not remove project config.
-- `pj config` - print project-wide volumes
-- `pj config set -v <src>:<dst>[:<opts>]...` - replace project-wide volumes
-- `pj config add -v <src>:<dst>[:<opts>]...` - append project-wide volumes
+- `pj config` - print project-wide volumes only
+- `pj config set [-v <src>:<dst>[:<opts>]]... [-e <NAME>=<value>]... [-p <dir>[:<dir>...]]...` - replace selected config
+  sections
+- `pj config add [-v <src>:<dst>[:<opts>]]... [-e <NAME>=<value>]... [-p <dir>[:<dir>...]]...` - append to selected
+  sections
 - `pj uninit [--force]` - remove every workspace and restore a plain full checkout at the repo root, advanced to the
   workspaces' landed work (merged when several diverged); refuses while any workspace has unlanded work (`--force`
   overrides; the working copies are snapshotted and kept either way). `shared/` is left behind - `rm -rf shared` once
@@ -127,11 +129,26 @@ JAVA_HOME=/home/tools/jdk
 ```
 
 Environment names must match `[A-Za-z_][A-Za-z0-9_]*`; `PI_JAIL_PATH_PREPEND` is reserved for internal use. Environment
-values are literal: no quote removal, interpolation, or evaluation (`$HOME` and `~` stay literal). Empty values and
-embedded `=` are allowed; project values override same-name entries from `~/.config/pi-jail/jail.env`, and the last
-duplicate `NAME` wins. Set `PATH` with `[path-prepend]`, not `[env]`: list absolute container directories, one per line,
-without `:`. Earlier entries take precedence, followed by the image's existing `PATH`; directories may not exist in the
-jail yet.
+values are literal: `pj` does no quote removal, interpolation, or evaluation (`$HOME` and `~` stay literal). Empty
+values and embedded `=` are allowed; CR and newline values are rejected. Project values override same-name entries from
+`~/.config/pi-jail/jail.env`, and the last duplicate `NAME` wins. Set `PATH` with `[path-prepend]`, not `[env]`: list
+absolute container directories, one per line, without `:`. Earlier entries take precedence, followed by the image's
+existing `PATH`; directories may not exist in the jail yet.
+
+CLI `-e`/`--env NAME=value` and `-p`/`--path DIR:DIR` options repeat and mix with `-v`/`--volume`. Quote shell
+metacharacters such as `$` and spaces when needed: the caller shell acts before `pj`, which does no further expansion.
+For example:
+
+```
+pj config set -e GOTOOLCHAIN=auto -e JAVA_HOME=/home/tools/jdk -p '/home/my tools/bin:/opt/bin'
+pj config add -e JAVA_HOME=/opt/jdk -p /opt/jdk/bin
+```
+
+Each `-p` takes colon-separated absolute jail directories, with no empty components; spaces are allowed, and directories
+need not exist on the host. In the file, `[path-prepend]` remains one directory per line. `set` replaces each selected
+section entirely; `add` appends selected sections, with new path entries after existing prefixes. Mixed updates are
+validated fully before one atomic config replacement; startup uses the same validation. Concurrent config writes are not
+serialized.
 
 Keep `pi-jail.conf` untracked, host-owned, and outside the jail; keep pi-jail-specific setup/instructions out of
 downstream VCS. Keep user-wide `~/.config/pi-jail/jail.env` for gateway virtual keys.

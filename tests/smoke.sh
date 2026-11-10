@@ -238,12 +238,12 @@ check "write missing src names section and path" "1" \
 	"$(grep -Fc "pi-jail.conf [volumes]: no such host path: $T/c4/no" "$T/c4/stderr")"
 check "invalid write creates no config" "0" "$([ -e "$T/c4/pi-jail.conf" ] && echo 1 || echo 0)"
 
-# Set/add require at least one volume; invalid invocation never writes.
+# Set/add require at least one entry; invalid invocation never writes.
 cp "$T/c2/pi-jail.conf" "$T/c2/original.conf"
 for mode in set add; do
 	(cd "$T/c2" && "$P" config "$mode") >/dev/null 2>&1
-	check "config $mode needs volumes" "2" "$?"
-	check "config $mode without volumes leaves config intact" "0" \
+	check "config $mode needs entries" "2" "$?"
+	check "config $mode without entries leaves config intact" "0" \
 		"$(cmp -s "$T/c2/original.conf" "$T/c2/pi-jail.conf"; echo $?)"
 done
 
@@ -670,6 +670,228 @@ for workspace in env path-prepend volumes; do
 	check "drop accepts workspace $workspace" "0" "$?"
 	check "drop $workspace leaves config intact" "0" \
 		"$(cmp -s "$T/env/original.conf" "$T/env/pi-jail.conf"; echo $?)"
+done
+
+# --- config env/path CLI: literal ordered updates, one atomic replacement ----
+rm "$T/env/pi-jail.conf"
+project_pj config set --env "$literal" -e EMPTY= -e EQUALS=a=b=c -e DUP=first >/dev/null 2>&1
+check "env-only set creates config without volumes" "0" "$?"
+check "env-only set preserves literal entries" "$literal
+EMPTY=
+EQUALS=a=b=c
+DUP=first" "$(conf "$T/env" env)"
+project_pj config add -e DUP=last --env AFTER=value >/dev/null 2>&1
+check "env-only add succeeds" "0" "$?"
+check "env-only add keeps duplicate order" "$literal
+EMPTY=
+EQUALS=a=b=c
+DUP=first
+DUP=last
+AFTER=value" "$(conf "$T/env" env)"
+project_pj config >/dev/null 2>&1
+check "bare config still prints volumes only" "1" "$?"
+project_pj config set -p '/container/not-on-host:/container/with spaces' --path /last >/dev/null 2>&1
+check "path-only set needs no host directories or volumes" "0" "$?"
+project_pj config add --path /added:/final -p /tail >/dev/null 2>&1
+check "path-only add succeeds" "0" "$?"
+check "path flags split and append in order" "/container/not-on-host
+/container/with spaces
+/last
+/added
+/final
+/tail" "$(conf "$T/env" path-prepend)"
+for command in open debug; do
+	: >"$out"
+	project_pj "$command" foo >/dev/null 2>&1
+	check "$command CLI-created config succeeds" "0" "$?"
+	check "$command CLI-created env order and final carrier" "--env-file
+$T/env/cfg/pi-jail/jail.env
+--env
+$literal
+--env
+EMPTY=
+--env
+EQUALS=a=b=c
+--env
+DUP=first
+--env
+DUP=last
+--env
+AFTER=value
+--env
+PI_JAIL_PATH_PREPEND=/container/not-on-host:/container/with spaces:/last:/added:/final:/tail" "$(env_args)"
+done
+check "CLI payloads never execute" "1" \
+	"$([ ! -e "$T/env/env-payload" ] && [ ! -e "$T/env/env-backtick" ] && echo 1 || echo 0)"
+
+# Untouched sections retain CRLF, comments, blanks, and missing final newline.
+printf '# top\r\n[volumes]\r\n/tmp:/mnt/keep\r\n\r\n[env]\nOLD=value\n[path-prepend]\r\n/keep' \
+	>"$T/env/pi-jail.conf"
+printf '# top\r\n[volumes]\r\n/tmp:/mnt/keep\r\n\r\n[env]\nNEW=value\n[path-prepend]\r\n/keep' \
+	>"$T/env/expected.conf"
+project_pj config set -e NEW=value >/dev/null 2>&1
+check "env set succeeds with untouched CRLF sections" "0" "$?"
+check "env set leaves untouched bytes exact" "0" \
+	"$(cmp -s "$T/env/expected.conf" "$T/env/pi-jail.conf"; echo $?)"
+
+while IFS='|' read -r mode old_env old_paths old_volumes; do
+	printf -v old_env '%b' "$old_env"
+	printf -v old_paths '%b' "$old_paths"
+	printf -v old_volumes '%b' "$old_volumes"
+	printf '# top\n[env]\nOLD=first\n# env note\n\n[volumes]\n/tmp:/mnt/old\n' >"$T/env/pi-jail.conf"
+	printf '[path-prepend]\n/old\n[env]\nOLD=last\n# repeat note\n[path-prepend]\n/second\n' \
+		>>"$T/env/pi-jail.conf"
+	project_pj config "$mode" -p /one:/two -e A=first --volume /tmp:/mnt/new \
+		--env A=last --path /three -v /tmp:/mnt/final >/dev/null 2>&1
+	check "mixed $mode accepts repeated short and long flags" "0" "$?"
+	check "mixed $mode consolidates sections, preserves comments, orders lists" "# top
+[env]
+${old_env}A=first
+A=last
+# env note
+
+[volumes]
+${old_volumes}/tmp:/mnt/new
+/tmp:/mnt/final
+[path-prepend]
+${old_paths}/one
+/two
+/three
+# repeat note" "$(<"$T/env/pi-jail.conf")"
+	project_pj config add -e A=after -p /after >/dev/null 2>&1
+	check "mixed $mode roundtrip env does not multiply entries" "${old_env}A=first
+A=last
+A=after" "$(conf "$T/env" env | grep -vE '^(#|$)')"
+done <<'MIXED'
+set|||
+add|OLD=first\nOLD=last\n|/old\n/second\n|/tmp:/mnt/old\n
+MIXED
+
+# Path updates retain all other bytes, even unknown/empty section headers.
+printf '[path-prepend]\n/old\n# path note\n[env]\r\nKEEP=value\r\n[]\r\n# unknown\r\n' \
+	>"$T/env/pi-jail.conf"
+printf '[volumes]\r\n/tmp:/mnt/keep' >>"$T/env/pi-jail.conf"
+project_pj config set -p /new >"$T/env/stdout" 2>"$T/env/stderr"
+check "path set with empty unknown header succeeds" "0" "$?"
+check "path set with empty unknown header emits no errors" "" "$(<"$T/env/stderr")"
+project_pj config add --path /next >/dev/null 2>&1
+check "path add with untouched sections succeeds" "0" "$?"
+printf '[path-prepend]\n/new\n/next\n# path note\n[env]\r\nKEEP=value\r\n[]\r\n# unknown\r\n' \
+	>"$T/env/expected.conf"
+printf '[volumes]\r\n/tmp:/mnt/keep' >>"$T/env/expected.conf"
+check "path set/add leaves other sections byte exact" "0" \
+	"$(cmp -s "$T/env/expected.conf" "$T/env/pi-jail.conf"; echo $?)"
+
+# Late bad entries cannot partially commit earlier valid sections.
+for mode in set add; do
+	while IFS='|' read -r flag bad; do
+		cp "$T/env/pi-jail.conf" "$T/env/before.conf"
+		project_pj config "$mode" -v /tmp:/mnt/valid -e VALID=value -p /valid "$flag" "$bad" \
+			>/dev/null 2>&1
+		check "mixed $mode rejects $flag $bad" "1" "$?"
+		check "invalid $mode $flag $bad leaves all bytes intact" "0" \
+			"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+	done <<'INVALID_CLI'
+-e|NO_EQUALS
+-e|1BAD=value
+-e|BAD-NAME=value
+-e|BAD NAME=value
+-e|=value
+-e|PATH=/replacement
+-e|PI_JAIL_PATH_PREPEND=/hijack
+-p|
+-p|relative/bin
+-p|~/bin
+-p|$HOME/bin
+-p|/one:
+-p|:/two
+-p|/one::/two
+-p|/one:relative
+-v|/no-such-pj-host-directory:/mnt
+INVALID_CLI
+	for flag in -v --volume -e --env -p --path; do
+		for bad in $'A=x\n[volumes]\n/tmp:/injected' $'/valid\r\n[env]\nA=injected' $'/valid\r'; do
+			project_pj config "$mode" -v /tmp:/mnt/valid -e VALID=value -p /valid "$flag" "$bad" \
+				>/dev/null 2>&1
+			check "$mode $flag rejects CR/newline before serialization/splitting" "1" "$?"
+			check "$mode $flag CR/newline keeps config intact" "0" \
+				"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+		done
+		project_pj config "$mode" -e VALID=value "$flag" >/dev/null 2>&1
+		check "$mode $flag missing value is usage error" "2" "$?"
+		project_pj config "$mode" "$flag" --env VALID=value >/dev/null 2>&1
+		check "$mode $flag missing value before next flag is usage error" "2" "$?"
+	done
+	for flag in --unknown bare; do
+		project_pj config "$mode" -e VALID=value "$flag" >/dev/null 2>&1
+		check "$mode rejects unknown argument $flag" "2" "$?"
+	done
+	check "$mode usage errors keep config intact" "0" \
+		"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+done
+
+# Add validates retained entries in every selected section before writing.
+while IFS='|' read -r section bad; do
+	printf '[%s]\n%s\n' "$section" "$bad" >"$T/env/pi-jail.conf"
+	cp "$T/env/pi-jail.conf" "$T/env/before.conf"
+	project_pj config add -v /tmp:/mnt/valid -e VALID=value -p /valid >/dev/null 2>&1
+	check "add rejects retained invalid $section" "1" "$?"
+	check "add retains invalid $section without mutation" "0" \
+		"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+done <<'INVALID_RETAINED'
+env|BAD-NAME=value
+path-prepend|relative
+volumes|/no-such-pj-host-directory:/mnt
+INVALID_RETAINED
+
+# One final rename for mixed updates; failure removes temp without touching config.
+real_mv=$(command -v mv)
+printf '#!/bin/sh\nprintf "rename\\n" >>"$MV_LOG"\n[ "${FAIL_MV:-0}" = 0 ] || exit 1\nexec "%s" "$@"\n' \
+	"$real_mv" >"$T/env/bin/mv"
+chmod +x "$T/env/bin/mv"
+export MV_LOG="$T/env/mv.log"
+: >"$MV_LOG"
+project_pj config set -v /tmp:/mnt/valid -e VALID=value -p /valid >/dev/null 2>&1
+check "mixed update succeeds through rename stub" "0" "$?"
+check "mixed update performs one final rename" "1" "$(wc -l <"$MV_LOG")"
+cp "$T/env/pi-jail.conf" "$T/env/before.conf"
+FAIL_MV=1 project_pj config set -v /tmp:/mnt/new -e NEW=value -p /new >/dev/null 2>&1
+check "rename failure fails mixed update" "1" "$?"
+check "rename failure preserves config bytes" "0" \
+	"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+rm "$T/env/pi-jail.conf"
+FAIL_MV=1 project_pj config add -v /tmp:/mnt/new -e NEW=value -p /new >/dev/null 2>&1
+check "new config rename failure fails mixed update" "1" "$?"
+check "failed mixed creation leaves no config or temp" "" \
+	"$(printf '%s\n' "$T/env"/{pi-jail.conf,.pi-jail.conf.tmp*} | while IFS= read -r f; do
+		[ ! -e "$f" ] || printf '%s\n' "$f"
+	done)"
+rm "$T/env/bin/mv"
+unset MV_LOG
+
+# Real write errors (not just rename errors) also leave no partial replacement.
+printf '#!/bin/sh\nln -s /dev/full .pi-jail.conf.tmp.full\nprintf ".pi-jail.conf.tmp.full\\n"\n' \
+	>"$T/env/bin/mktemp"
+chmod +x "$T/env/bin/mktemp"
+printf '[env]\nKEEP=value\n' >"$T/env/pi-jail.conf"
+cp "$T/env/pi-jail.conf" "$T/env/before.conf"
+project_pj config set -v /tmp:/mnt/new -e NEW=value -p /new >/dev/null 2>&1
+check "existing config write failure fails mixed update" "1" "$?"
+check "existing config write failure cleans temp" "0" \
+	"$([ -L "$T/env/.pi-jail.conf.tmp.full" ] && echo 1 || echo 0)"
+check "write failure preserves existing config bytes" "0" \
+	"$(cmp -s "$T/env/before.conf" "$T/env/pi-jail.conf"; echo $?)"
+rm "$T/env/pi-jail.conf"
+project_pj config set -v /tmp:/mnt/new -e NEW=value -p /new >/dev/null 2>&1
+check "new config write failure fails mixed update" "1" "$?"
+check "new config write failure cleans temp" "0" \
+	"$([ -L "$T/env/.pi-jail.conf.tmp.full" ] && echo 1 || echo 0)"
+check "write failure creates no config" "0" "$([ -e "$T/env/pi-jail.conf" ] && echo 1 || echo 0)"
+rm "$T/env/bin/mktemp"
+
+for flag in '-v' '--volume' '-e' '--env' '-p' '--path'; do
+	"$P" >"$T/help.out" 2>&1
+	check "help lists $flag" "1" "$(grep -qF -- "$flag" "$T/help.out" && echo 1 || echo 0)"
 done
 
 echo

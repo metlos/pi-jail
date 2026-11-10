@@ -16,10 +16,12 @@ usage() {
 	echo "       pj fill <ws/name>           fill ws/<name> with new shared/project entries" >&2
 	echo "       pj drop [--force] <ws/name>  remove workspace (refuses on unlanded working copy)" >&2
 	echo "       pj config                   print the project's extra mounts (pi-jail.conf [volumes])" >&2
-	echo "       pj config set -v <src>:<dst>[:opts]..." >&2
-	echo "                                    replace the project's extra mounts" >&2
-	echo "       pj config add -v <src>:<dst>[:opts]..." >&2
-	echo "                                    add extra mounts to the project" >&2
+	echo "       pj config set FLAGS...      replace only sections selected by flags" >&2
+	echo "       pj config add FLAGS...      append to sections selected by flags" >&2
+	echo "         -v, --volume <src>:<dst>[:opts]  extra mount (host source must exist)" >&2
+	echo "         -e, --env NAME=value            literal env assignment; duplicates last-wins" >&2
+	echo "         -p, --path /dir[:/dir...]        prepend absolute container directories to PATH" >&2
+	echo "         Flags repeat/mix; at least one required. Unselected sections stay unchanged." >&2
 	echo "       pj uninit [--force]         remove workspaces, restore full checkout at repo root" >&2
 	echo "       pj open <ws/name> [args...] run the pi coding agent in the workspace's jail" >&2
 	echo "       pj debug <ws/name>          start a shell in the workspace's jail" >&2
@@ -166,46 +168,81 @@ section_lines() { # section_lines NAME
 	return 0
 }
 
-# Rewrite pi-jail.conf with the section's lines replaced by "$@" (or removed
-# when none). Other sections, comments and blank lines are preserved as-is;
-# a section that did not exist is appended at the end. Repeated headers are
-# consolidated at the first occurrence; comments keep their relative order.
-write_section() { # write_section NAME [LINES...]
-	local name=$1
-	shift
-	[ -f pi-jail.conf ] || [ $# -gt 0 ] || return 0
-	local tmp=.pi-jail.conf.tmp
-	local in_section=0 found=0 line
-	: >"$tmp"
-	if [ -f pi-jail.conf ]; then
-		while IFS= read -r line || [ -n "$line" ]; do
-			line=${line%$'\r'}
-			case $line in
-			"[$name]")
-				in_section=1
-				if [ "$found" -eq 0 ] && [ $# -gt 0 ]; then
-					printf '[%s]\n' "$name" >>"$tmp"
-					for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
+# Nonempty arrays select sections. Consolidate repeated headers once, retaining
+# untouched bytes and all comments/blanks. One rename commits the whole update.
+write_config() ( # write_config VOLUMES_ARRAY ENV_ARRAY PATHS_ARRAY
+	local -A lists=([volumes]=$1 [env]=$2 [path-prepend]=$3) found=()
+	local tmp line header section ending skip=0
+	tmp=$(mktemp .pi-jail.conf.tmp.XXXXXX) || die "cannot create config temp file"
+	trap 'rm -f -- "$tmp"' EXIT
+	{
+		if [ -f pi-jail.conf ]; then
+			while :; do
+				ending=$'\n'
+				if ! IFS= read -r line; then
+					[ -n "$line" ] || break
+					ending=
 				fi
-				found=1
-				;;
-			\[*\])
-				in_section=0
-				printf '%s\n' "$line" >>"$tmp"
-				;;
-			'#'* | '') printf '%s\n' "$line" >>"$tmp" ;;
-			*)
-				[ "$in_section" -eq 1 ] || printf '%s\n' "$line" >>"$tmp"
-				;;
-			esac
-		done <pi-jail.conf
-	fi
-	if [ "$found" -eq 0 ] && [ $# -gt 0 ]; then # section not in file yet
-		[ -s "$tmp" ] && printf '\n' >>"$tmp"
-		printf '[%s]\n' "$name" >>"$tmp"
-		for spec in "$@"; do printf '%s\n' "$spec" >>"$tmp"; done
-	fi
-	mv "$tmp" pi-jail.conf
+				header=${line%$'\r'}
+				case $header in
+				\[*\])
+					skip=0
+					section=${header:1:-1}
+					if [[ -n $section && -n ${lists[$section]:-} ]]; then
+						local -n entries=${lists[$section]}
+						if [ ${#entries[@]} -gt 0 ]; then
+							skip=1
+							if [ -z "${found[$section]:-}" ]; then
+								printf '[%s]\n' "$section"
+								printf '%s\n' "${entries[@]}"
+								found[$section]=1
+							fi
+						fi
+					fi
+					if [ "$skip" -eq 0 ]; then printf '%s%s' "$line" "$ending"; fi
+					;;
+				'#'* | '') printf '%s%s' "$line" "$ending" ;;
+				*) if [ "$skip" -eq 0 ]; then printf '%s%s' "$line" "$ending"; fi ;;
+				esac
+			done <pi-jail.conf
+		fi
+		for section in volumes env path-prepend; do
+			local -n entries=${lists[$section]}
+			if [ ${#entries[@]} -gt 0 ] && [ -z "${found[$section]:-}" ]; then
+				if [ -s "$tmp" ]; then printf '\n'; fi
+				printf '[%s]\n' "$section"
+				printf '%s\n' "${entries[@]}"
+			fi
+		done
+	} >"$tmp"
+	mv -- "$tmp" pi-jail.conf || die "cannot replace pi-jail.conf"
+)
+
+check_config_line() {
+	case $1 in
+	*$'\n'* | *$'\r'*) die "pi-jail.conf: newline and CR are not allowed in entries" ;;
+	esac
+}
+
+check_env() {
+	local line=$1 key
+	check_config_line "$line"
+	[[ $line == *=* ]] || die "pi-jail.conf [env]: expected NAME=value assignment: $line"
+	key=${line%%=*}
+	[[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "pi-jail.conf [env]: invalid env name: $line"
+	case $key in
+	PATH) die "pi-jail.conf [env]: use [path-prepend] to preserve container PATH: $line" ;;
+	PI_JAIL_PATH_PREPEND) die "pi-jail.conf [env]: reserved internal variable: $line" ;;
+	esac
+}
+
+check_path() {
+	check_config_line "$1"
+	case $1 in
+	*:*) die "pi-jail.conf [path-prepend]: colon is not allowed in a directory: $1" ;;
+	/*) ;;
+	*) die "pi-jail.conf [path-prepend]: expected absolute container directory: $1" ;;
+	esac
 }
 
 # A bind source must exist: podman auto-creates missing sources as
@@ -213,6 +250,7 @@ write_section() { # write_section NAME [LINES...]
 check_specs() { # check_specs SPECS...
 	local spec src
 	for spec in "$@"; do
+		check_config_line "$spec"
 		src=${spec%%:*}
 		[ -e "$src" ] || die "pi-jail.conf [volumes]: no such host path: $src"
 	done
@@ -321,42 +359,69 @@ cmd_config() {
 		return
 	fi
 
-	declare -a specs=()
+	declare -a volumes=() env=() paths=()
+	local flag value rest part i spec src section line
 	while [ $# -gt 0 ]; do
-		case $1 in
-		-v | --volume)
+		flag=$1
+		case $flag in
+		-v | --volume | -e | --env | -p | --path)
 			[ $# -ge 2 ] || usage
-			specs+=("$2")
+			case $2 in -v | --volume | -e | --env | -p | --path | --) usage ;; esac
+			value=$2
+			check_config_line "$value"
+			case $flag in
+			-v | --volume) volumes+=("$value") ;;
+			-e | --env) env+=("$value") ;;
+			-p | --path)
+				rest=$value
+				while :; do
+					part=${rest%%:*}
+					check_path "$part"
+					paths+=("$part")
+					[[ $rest == *:* ]] || break
+					rest=${rest#*:}
+				done
+				;;
+			esac
 			shift 2
 			;;
 		--) shift; break ;;
-		-*) usage ;;
 		*) usage ;;
 		esac
 	done
 	[ $# -eq 0 ] || usage
-	[ ${#specs[@]} -gt 0 ] || usage
-	# relative -v srcs resolve against the invocation dir, not the root
-	local i spec src
-	for i in "${!specs[@]}"; do
-		spec=${specs[i]} src=${spec%%:*}
+	[ $((${#volumes[@]} + ${#env[@]} + ${#paths[@]})) -gt 0 ] || usage
+	# Relative -v srcs resolve against the invocation dir, not the root.
+	for i in "${!volumes[@]}"; do
+		spec=${volumes[i]} src=${spec%%:*}
 		case $src in
 		/*) ;;
-		*) specs[i]="$inv/$src:${spec#*:}" ;;
+		*) volumes[i]="$inv/$src:${spec#*:}" ;;
 		esac
 	done
-	if [ "$mode" = add ]; then # existing lines first, then the new ones
-		declare -a existing=()
-		while IFS= read -r line; do existing+=("$line"); done < <(section_lines volumes)
-		specs=("${existing[@]}" "${specs[@]}")
-	fi
-	check_specs "${specs[@]}"
+	local -A lists=([volumes]=volumes [env]=env [path-prepend]=paths)
+	for section in volumes env path-prepend; do
+		local -n entries=${lists[$section]}
+		[ ${#entries[@]} -gt 0 ] || continue
+		if [ "$mode" = add ]; then
+			local -a existing=()
+			while IFS= read -r line; do existing+=("$line"); done < <(section_lines "$section")
+			entries=("${existing[@]}" "${entries[@]}")
+		fi
+		for line in "${entries[@]}"; do
+			case $section in
+			volumes) check_specs "$line" ;;
+			env) check_env "$line" ;;
+			path-prepend) check_path "$line" ;;
+			esac
+		done
+	done
 	# Protect host-owned config from jj snapshots, even before init.
 	[ -d .git/info ] || die "cannot locally exclude pi-jail.conf; run pj init first"
 	if ! grep -qxF pi-jail.conf .git/info/exclude 2>/dev/null; then
 		printf '\npi-jail.conf\n' >>.git/info/exclude || die "cannot locally exclude pi-jail.conf; run pj init first"
 	fi
-	write_section volumes "${specs[@]}"
+	write_config volumes env paths
 }
 
 # Reverse of init: remove the workspaces, restore a plain full checkout at
@@ -456,23 +521,13 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 
 	# Validate in this shell: errors in a process-substitution producer would be lost.
 	declare -a project_env=()
-	local line key prefix=
+	local line prefix=
 	while IFS= read -r line; do
-		[[ $line == *=* ]] || die "pi-jail.conf [env]: expected NAME=value assignment: $line"
-		key=${line%%=*}
-		[[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "pi-jail.conf [env]: invalid env name: $line"
-		case $key in
-		PATH) die "pi-jail.conf [env]: use [path-prepend] to preserve container PATH: $line" ;;
-		PI_JAIL_PATH_PREPEND) die "pi-jail.conf [env]: reserved internal variable: $line" ;;
-		esac
+		check_env "$line"
 		project_env+=(--env "$line")
 	done < <(section_lines env)
 	while IFS= read -r line; do
-		case $line in
-		*:*) die "pi-jail.conf [path-prepend]: colon is not allowed in a directory: $line" ;;
-		/*) ;;
-		*) die "pi-jail.conf [path-prepend]: expected absolute container directory: $line" ;;
-		esac
+		check_path "$line"
 		prefix+="${prefix:+:}$line"
 	done < <(section_lines path-prepend)
 	# Always override jail.env so it cannot inject the internal carrier.
