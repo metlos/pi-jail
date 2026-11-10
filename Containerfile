@@ -12,12 +12,12 @@ RUN dnf update -y \
   fzf \
   fd \
   jq \
-  npm \
   uv \
-  python3 \
-  python3-pip \
   diffutils \
   patch \
+  python3 \
+  python3-pip \
+  npm \
   && dnf clean all
 
 # jj
