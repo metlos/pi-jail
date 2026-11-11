@@ -11,7 +11,8 @@ podman build . -t pi-jail:latest
 2. Copy the `./pj` script to your path (do not keep it inside an adopted repo - the root is dematerialized by
    `pj init`).
 
-3. Set up the person configuration - LLM gateway and MCP gateways (see [Person configuration](#person-configuration)):
+Set up the person configuration - LLM gateway and MCP gateways (see [Person configuration](#person-configuration)) -
+and, optionally, copy the tool recipes you want (see [Tool recipes](#tool-recipes)):
 
 ```
 podman pull docker.io/maximhq/bifrost:latest
@@ -60,6 +61,11 @@ workspace, and from `ws/`, `pj open mytask` resolves the same as from the root.
   you no longer need the jail home and the shared entries. `pi-jail.conf` is kept and remains locally excluded from VCS
 - `pj open <name> [args...]` - run the pi coding agent in the workspace's jail
 - `pj debug <name>` - start a shell in the workspace's jail
+- `pj exec <name> <cmd> [args...]` - run a single command in the workspace's jail, non-interactively (same mounts and
+  environment as `pj open`)
+- `pj inject` - list the tool recipes in the user's recipe directory
+- `pj inject <name> [args...]` - run a tool recipe (see [Tool recipes](#tool-recipes)); `--verify <name>` additionally
+  verifies the adoption in a workspace's jail (`pj inject go --verify mytask`)
 
 `shared/project` entries land in workspaces as untracked symlinks. They are expected to be covered by the repo's own
 ignore rules (e.g. `node_modules` in `.gitignore`); entries that are not ignored show up as uncommitted changes in the
@@ -152,6 +158,30 @@ serialized.
 
 Keep `pi-jail.conf` untracked, host-owned, and outside the jail; keep pi-jail-specific setup/instructions out of
 downstream VCS. Keep user-wide `~/.config/pi-jail/jail.env` for gateway virtual keys.
+
+## Tool recipes
+
+A recipe is an executable script that adopts a host tool into a project's jail - it discovers the tool on the host,
+writes the project config via `pj config add` (volumes, `[env]`, `[path-prepend]`), and can verify the result inside a
+workspace's jail. Recipes are host-side: they configure the jail, they never run inside it. The repository ships them in
+`recipes/`; copy the ones you want to `~/.config/pi-jail/recipes/` (same model as copying `pj` to your `PATH`).
+
+```
+pj inject            # list recipes found in ~/.config/pi-jail/recipes
+pj inject go         # adopt the host Go installation into this project
+pj inject go --verify ws/mytask   # then verify it inside the mytask jail
+```
+
+A recipe runs from the project root with its remaining arguments and full control of its own prompts; it calls `pj`
+itself, so it can check `pj config` output before writing or skip an already-adopted tool. `--verify <name>` selects a
+workspace for verification: `pj` exports `PI_JAIL_VERIFY_WS=<name>` and the recipe runs its checks there via `pj exec`
+(non-interactive single command in the workspace's jail). Without `--verify`, no verification runs. A failed
+verification keeps the written config and prints how to diagnose it (`pj config`, `pj debug <name>`).
+
+Recipes are ordinary host executables called with no arguments beyond what `pj inject` passes: read one before running
+it, and prefer recipes you audited. The shipped `go` recipe mounts one verified host GOROOT read-only at `/opt/go`,
+prepends `/opt/go/bin` to the jail `PATH`, sets `GOTOOLCHAIN=local`, refuses mutable version-manager aliases, and asks
+before writing.
 
 ## Person configuration
 

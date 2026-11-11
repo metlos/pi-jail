@@ -25,6 +25,10 @@ usage() {
 	echo "       pj uninit [--force]         remove workspaces, restore full checkout at repo root" >&2
 	echo "       pj open <ws/name> [args...] run the pi coding agent in the workspace's jail" >&2
 	echo "       pj debug <ws/name>          start a shell in the workspace's jail" >&2
+	echo "       pj exec <ws/name> <cmd...>  run a command in the workspace's jail (non-interactive)" >&2
+	echo "       pj inject                   list the tool recipes in ~/.config/pi-jail/recipes" >&2
+	echo "       pj inject <name> [args...]  run a tool recipe at the project root" >&2
+	echo "         --verify <ws/name>         export PI_JAIL_VERIFY_WS=<ws/name> for the recipe" >&2
 	exit 2
 }
 
@@ -492,13 +496,57 @@ cmd_debug() {
 	run_jail "$name" bash
 }
 
+cmd_exec() {
+	[ $# -ge 2 ] || usage
+	cd_root
+	local name
+	name=$(ws_name "$1")
+	shift
+	PI_JAIL_INTERACTIVE= run_jail "$name" "$@"
+}
+
+# Tool-adoption recipes: host-side scripts from the user's recipe dir that
+# adopt a host tool into a project (config, mounts, verification). The recipe
+# runs at the project root and calls pj itself; --verify only selects the
+# workspace recipes may verify in via PI_JAIL_VERIFY_WS.
+cmd_inject() {
+	local dir="${XDG_CONFIG_HOME:-$HOME/.config}/pi-jail/recipes"
+	if [ $# -eq 0 ]; then
+		local found=0 name
+		for f in "$dir"/*.sh; do
+			[ -x "$f" ] || continue
+			found=1
+			name=${f##*/}
+			echo "${name%.sh}"
+		done
+		[ "$found" -eq 1 ] || echo "pj: no recipes in $dir (copy them from the pi-jail repo)" >&2
+		return
+	fi
+	local verify=
+	local name=$1
+	shift
+	if [ "${1:-}" = "--verify" ]; then
+		[ $# -ge 2 ] || usage
+		verify=$2
+		shift 2
+	fi
+	cd_root
+	local recipe="$dir/$name.sh"
+	[ -f "$recipe" ] || die "no recipe '$name' in $dir"
+	[ -x "$recipe" ] || die "recipe not executable: $recipe"
+	if [ -n "$verify" ]; then
+		export PI_JAIL_VERIFY_WS="$verify"
+	else
+		unset PI_JAIL_VERIFY_WS
+	fi
+	exec "$recipe" "$@"
+}
+
 # Jail runner: NAME is the bare workspace name, the rest is the command line.
 run_jail() { # run_jail NAME CMD [ARGS...]
 	local name=$1
 	shift
 	cd_root
-
-	# jail config: lives outside the image and the project mount, injected here
 	# at run time (models.json mounted over the seeded stub, settings.json copied)
 	local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/pi-jail"
 	local f
@@ -533,9 +581,7 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 	# Always override jail.env so it cannot inject the internal carrier.
 	project_env+=(--env "PI_JAIL_PATH_PREPEND=$prefix")
 
-	ws_ensure_full "$name"
-
-	# Project mounts follow fixed mounts so they can shadow them. Validate in
+	ws_ensure_full "$name" Validate in
 	# this shell: hand-edited missing sources must fail before Podman runs.
 	# The host-owned config stays outside the jail.
 	declare -a extra_vols=()
@@ -590,7 +636,7 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 	# (host.containers.internal points at the host's real address, not loopback),
 	# so map loopback to 169.254.1.3 and repoint the name there. Side effect:
 	# all host loopback services become reachable from the jail.
-	podman run --rm -it \
+	podman run --rm ${PI_JAIL_INTERACTIVE:+-it} \
 		--userns=keep-id \
 		--network=pasta:--map-host-loopback,169.254.1.3 \
 		--add-host host.containers.internal:169.254.1.3 \
@@ -617,6 +663,8 @@ fill) shift; cmd_fill "$@" ;;
 drop) shift; cmd_drop "$@" ;;
 config) shift; cmd_config "$@" ;;
 open) shift; [ $# -ge 1 ] || usage; cmd_open "$@" ;;
+exec) shift; cmd_exec "$@" ;;
+inject) shift; cmd_inject "$@" ;;
 debug) shift; [ $# -eq 1 ] || usage; cmd_debug "$@" ;;
 *) usage ;;
 esac

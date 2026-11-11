@@ -894,6 +894,163 @@ for flag in '-v' '--volume' '-e' '--env' '-p' '--path'; do
 	check "help lists $flag" "1" "$(grep -qF -- "$flag" "$T/help.out" && echo 1 || echo 0)"
 done
 
+# --- pj inject: recipe library dispatch --------------------------------------
+# given: recipe scripts in the user's recipe dir (~/.config/pi-jail/recipes)
+# when: pj inject runs them or lists them
+# then: recipes are found by name, run at the project root with free args,
+# and --verify <ws> is passed via PI_JAIL_VERIFY_WS
+mkrepo "$T/inj"
+adopt "$T/inj"
+INJ="$T/inj"
+mkdir -p "$INJ/cfg/pi-jail/recipes" "$INJ/bin"
+cat >"$INJ/cfg/pi-jail/recipes/upper.sh" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s\n' "$(basename "$PWD")"
+printf 'verify=%s\n' "${PI_JAIL_VERIFY_WS-unset}"
+for a in "$@"; do printf 'arg=%s\n' "$a"; done
+printf 'args_done\n'
+EOF
+chmod +x "$INJ/cfg/pi-jail/recipes/upper.sh"
+inj_pj() {
+	( cd "$INJ" && XDG_CONFIG_HOME="$INJ/cfg" PATH="$INJ/bin:$PATH" "$P" inject "$@" )
+}
+r=$(inj_pj)
+check "bare inject lists recipe names" "upper" "$r"
+printf '#!/bin/sh\ntrue\n' >"$INJ/cfg/pi-jail/recipes/notexec.sh"
+r=$(inj_pj)
+check "bare inject lists only executable recipes" "upper" "$r"
+r=$(inj_pj notexec 2>&1)
+check "inject non-executable recipe fails" "1" "$?"
+check "inject non-executable names it" "1" "$(printf '%s\n' "$r" | grep -c 'notexec.sh')"
+rm "$INJ/cfg/pi-jail/recipes/notexec.sh"
+r=$(inj_pj upper one two)
+check "inject runs recipe and passes args" "cwd=inj
+verify=unset
+arg=one
+arg=two
+args_done" "$r"
+r=$(inj_pj upper --verify ws/foo extra)
+check "inject exports PI_JAIL_VERIFY_WS" "cwd=inj
+verify=ws/foo
+arg=extra
+args_done" "$r"
+r=$(inj_pj upper --verify)
+check "inject --verify without value is usage error" "2" "$?"
+r=$(inj_pj nope 2>&1)
+check "inject unknown recipe fails" "1" "$?"
+check "inject unknown recipe names it and the dir" "1" \
+	"$(printf '%s\n' "$r" | grep -c "nope.*$INJ/cfg/pi-jail/recipes")"
+
+# given: a recipe is a library, not a one-shot config writer
+# when: inject runs it
+# then: pj stays usable inside (recipes call pj config add themselves)
+cat >"$INJ/cfg/pi-jail/recipes/cfgw.sh" <<EOF
+#!/bin/sh
+"$P" config add -v "$INJ/src:/mnt/x"
+EOF
+chmod +x "$INJ/cfg/pi-jail/recipes/cfgw.sh"
+mkdir -p "$INJ/src" "$INJ/cfg/pi-jail/recipes"
+printf '[volumes]\n/tmp:/mnt/keep\n' >"$INJ/pi-jail.conf"
+inj_pj cfgw >/dev/null 2>&1
+check "recipe can call pj config add" "0" "$?"
+check "recipe config lands in project pi-jail.conf" \
+	"/tmp:/mnt/keep
+$INJ/src:/mnt/x" "$(conf "$INJ" volumes)"
+
+# --- pj exec: non-interactive jail run ----------------------------------------
+# given: a stubbed podman
+# when: pj exec runs a command in a workspace's jail
+# then: the same mounts as open/debug but no -it flags
+out="$T/exec.out"
+mkproj "$T/exec" "$out"
+exec_pj() {
+	( cd "$T/exec" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" \
+		"$P" exec "${@}" )
+}
+exec_pj foo go version >/dev/null 2>&1
+check "exec runs podman" "1" "$([ -s "$out" ] && echo 1 || echo 0)"
+check "exec has no -it flags" "0" "$(grep -c '^-\(i\|t\)$' "$out")"
+check "exec runs the given command" "go
+version" "$(grep -A2 '^pi-jail:latest$' "$out" | tail -2)"
+exec_pj >/dev/null 2>&1
+check "exec without args is usage error" "2" "$?"
+
+# --- go recipe: discovery, apply, verify --------------------------------------
+# given: a fake host Go installation and a stubbed pj
+# when: recipes/go.sh runs
+# then: it discovers go, prompts before writing config, and verifies in-jail
+GOROOT_FAKE="$T/goroot"
+mkdir -p "$GOROOT_FAKE/bin" "$GOROOT_FAKE/pkg" "$GOROOT_FAKE/src"
+cat >"$GOROOT_FAKE/bin/go" <<EOF
+#!/bin/sh
+case "\$*" in
+"env GOROOT") printf '%s\n' "$GOROOT_FAKE" ;;
+"env GOVERSION") printf 'go1.99.1\n' ;;
+"env GOHOSTOS") printf 'linux\n' ;;
+"env GOHOSTARCH") printf 'amd64\n' ;;
+esac
+EOF
+chmod +x "$GOROOT_FAKE/bin/go"
+mkrepo "$T/gorec"
+adopt "$T/gorec"
+GOREC="$T/gorec"
+mkdir -p "$GOREC/bin"
+ln -s "$(command -v grep)" "$GOREC/bin/grep"
+cat >"$GOREC/bin/pj" <<EOF
+#!/bin/sh
+case "\$1" in
+config) printf 'pj config called with: %s\n' "\$*" ;;
+exec) printf 'pj exec called with: %s\n' "\$2" ;;
+esac
+EOF
+chmod +x "$GOREC/bin/pj"
+go_recipe() { # go_recipe -- runs the go recipe at the project root
+	( cd "$GOREC" && PATH="$GOREC/bin:$GOROOT_FAKE/bin" "$OLDPWD/recipes/go.sh" )
+}
+# no go on the host PATH: fail, point at the install docs
+( cd "$GOREC" && PATH="$GOREC/bin" "$OLDPWD/recipes/go.sh" ) \
+	</dev/null >"$T/gorec.stdout" 2>&1
+check "go recipe fails without host go" "1" "$?"
+check "go recipe failure names go" "1" "$(grep -c 'go' "$T/gorec.stdout")"
+# declined prompt: clean exit, no config write
+go_recipe </dev/null >"$T/gorec.stdout" 2>&1
+check "go recipe declined exits 0" "0" "$?"
+check "go recipe prompts before writing" "1" "$(grep -c 'Adopt' "$T/gorec.stdout")"
+check "go recipe declined writes no config" "0" "$(grep -c 'pj config' "$T/gorec.stdout")"
+# accepted: writes the adoption config via pj
+go_recipe <<<"y" >"$T/gorec.stdout" 2>&1
+check "go recipe accepted calls pj config add" "1" \
+	"$(grep -q "pj config called with: config add -v $GOROOT_FAKE:/opt/go:ro -p /opt/go/bin -e GOTOOLCHAIN=local" \
+		"$T/gorec.stdout" && echo 1 || echo 0)"
+# already adopted: idempotent rerun, no second write
+printf '[volumes]\n%s:/opt/go:ro\n' "$GOROOT_FAKE" >"$GOREC/pi-jail.conf"
+go_recipe <<<"y" >"$T/gorec.stdout" 2>&1
+check "go recipe rerun exits 0" "0" "$?"
+check "go recipe rerun skips config write" "0" "$(grep -c 'pj config' "$T/gorec.stdout")"
+# verification: PI_JAIL_VERIFY_WS drives pj exec in the jail
+( cd "$GOREC" && PATH="$GOREC/bin:$GOROOT_FAKE/bin" \
+	PI_JAIL_VERIFY_WS=ws/foo "$OLDPWD/recipes/go.sh" ) <<<"y" >"$T/gorec.stdout" 2>&1
+check "go recipe verifies via pj exec" "1" \
+	"$(grep -q 'pj exec called with: ws/foo' "$T/gorec.stdout" && echo 1 || echo 0)"
+# alias GOROOT (version-manager symlink): refuse, name the path
+ln -s "$GOROOT_FAKE" "$T/go-alias"
+mkdir -p "$T/aliased-bin"
+cat >"$T/aliased-bin/go" <<EOF
+#!/bin/sh
+case "\$*" in
+"env GOROOT") printf '%s\n' "$T/go-alias" ;;
+"env GOVERSION") printf 'go1.99.1\n' ;;
+"env GOHOSTOS") printf 'linux\n' ;;
+"env GOHOSTARCH") printf 'amd64\n' ;;
+esac
+EOF
+chmod +x "$T/aliased-bin/go"
+( cd "$GOREC" && PATH="$GOREC/bin:$T/aliased-bin" \
+	"$OLDPWD/recipes/go.sh" ) <<<"y" >"$T/gorec.stdout" 2>&1
+check "go recipe refuses alias GOROOT" "1" "$?"
+check "go recipe alias failure names the path" "1" \
+	"$(grep -q "$T/go-alias" "$T/gorec.stdout" && echo 1 || echo 0)"
+
 echo
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]
