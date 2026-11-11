@@ -19,7 +19,7 @@ Description=pi-jail MCP gateway: mcp-atlassian (Jira credentials stay on the hos
 # your Jira tools to the network. The jail reaches this via the pasta
 # --map-host-loopback mapping (host.containers.internal).
 ExecStart=/usr/bin/uvx mcp-atlassian --transport streamable-http --host 127.0.0.1 --port 8321
-EnvironmentFile=%h/.config/pi-jail/mcp.env
+EnvironmentFile=%h/.config/pi-jail/mcp-atlassian.env
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

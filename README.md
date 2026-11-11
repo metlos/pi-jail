@@ -222,9 +222,9 @@ cp proxy/bifrost.service proxy/mcp-atlassian.service ~/.config/systemd/user/
 cp proxy/bifrost.env.example ~/.config/pi-jail/bifrost.env
 chmod 600 ~/.config/pi-jail/bifrost.env
 
-# real MCP credentials for the host-side MCP services
-cp proxy/mcp.env.example ~/.config/pi-jail/mcp.env
-chmod 600 ~/.config/pi-jail/mcp.env
+# real credentials for the host-side mcp-atlassian service
+cp proxy/mcp-atlassian.env.example ~/.config/pi-jail/mcp-atlassian.env
+chmod 600 ~/.config/pi-jail/mcp-atlassian.env
 
 systemctl --user daemon-reload
 systemctl --user enable --now bifrost mcp-atlassian

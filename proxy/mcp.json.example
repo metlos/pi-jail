@@ -2,35 +2,6 @@
   "mcpServers": {
     "mcp-atlassian": {
       "url": "http://host.containers.internal:8321/mcp",
-      "directTools": [
-        "jira_get_user_profile",
-        "jira_get_issue",
-        "jira_search",
-        "jira_search_fields",
-        "jira_get_field_options",
-        "jira_get_project_issues",
-        "jira_get_transitions",
-        "jira_get_link_types",
-        "jira_create_issue",
-        "jira_update_issue",
-        "jira_assign_issue",
-        "jira_delete_issue",
-        "jira_link_to_epic",
-        "jira_create_issue_link",
-        "jira_create_remote_issue_link",
-        "jira_remove_issue_link",
-        "jira_transition_issue",
-        "jira_get_project_issue_types",
-        "jira_get_create_fields",
-        "jira_get_project_components",
-        "jira_search_projects",
-        "jira_get_project_fields",
-        "jira_get_issue_dates",
-        "jira_get_issue_development_info",
-        "jira_get_issues_development_info",
-        "jira_get_project_epic_hierarchy",
-        "jira_get_cross_project_dependencies"
-      ]
     },
     "code-review-graph": {
       "command": "uvx",
