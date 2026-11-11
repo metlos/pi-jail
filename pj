@@ -486,14 +486,16 @@ cmd_open() {
 	cd_root
 	name=$(ws_name "$1")
 	shift
-	run_jail "$name" pi "$@"
+	# -it reaches podman only when PI_JAIL_INTERACTIVE is set (cmd_exec clears
+	# it); without a tty pi exits immediately
+	PI_JAIL_INTERACTIVE=1 run_jail "$name" pi "$@"
 }
 
 cmd_debug() {
 	cd_root
 	local name
 	name=$(ws_name "$1")
-	run_jail "$name" bash
+	PI_JAIL_INTERACTIVE=1 run_jail "$name" bash
 }
 
 cmd_exec() {

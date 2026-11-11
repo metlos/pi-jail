@@ -969,11 +969,24 @@ exec_pj() {
 }
 exec_pj foo go version >/dev/null 2>&1
 check "exec runs podman" "1" "$([ -s "$out" ] && echo 1 || echo 0)"
-check "exec has no -it flags" "0" "$(grep -c '^-\(i\|t\)$' "$out")"
+check "exec has no -it flags" "0" "$(grep -cE '^-(i|t)+$' "$out")"
 check "exec runs the given command" "go
 version" "$(grep -A2 '^pi-jail:latest$' "$out" | tail -2)"
 exec_pj >/dev/null 2>&1
 check "exec without args is usage error" "2" "$?"
+
+# --- open/debug are interactive; exec is not -----------------------------------
+# given: a stubbed podman
+# when: pj open or pj debug runs
+# then: both pass -it - without a tty, pi and bash exit immediately
+out="$T/tty.out"
+mkproj "$T/tty" "$out"
+for command in open debug; do
+	: >"$out"
+	( cd "$T/tty" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" \
+		"$P" "$command" foo ) >/dev/null 2>&1
+	check "$command attaches -it" "1" "$(grep -c '^-it$' "$out")"
+done
 
 # --- go recipe: discovery, apply, verify --------------------------------------
 # given: a fake host Go installation and a stubbed pj
