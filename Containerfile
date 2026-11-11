@@ -15,6 +15,7 @@ RUN dnf update -y \
   uv \
   diffutils \
   patch \
+  podman \
   python3 \
   python3-pip \
   npm \
