@@ -25,4 +25,3 @@
 - Install tools in the jail, not on the host for the jail's sake.
 - Preserve the image's existing `PATH` when adding project paths.
 - Each adopted project has persistent `shared/home`, shared by its workspaces.
-

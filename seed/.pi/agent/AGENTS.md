@@ -154,3 +154,7 @@ More importantly, you minimize the token usage by by carefully splitting any tas
 todo list out of them and executing each todo item in a separate sub agent. You set up the sub agents with a model that
 is just up to the task. Never assign more capable model to a task a less capable model can achieve, too. Don't make the
 subagents inherit your context. Just supply them with only the instructions they need to fulfill their goal.
+
+## Accessing External Systems
+
+Even if an external system (like Jira, github, ...) is mentioned during the course of work, never modify anything in the external system without explicit approval from the user.
