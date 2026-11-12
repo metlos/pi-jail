@@ -17,8 +17,7 @@ check() {
 }
 mkdir -p "$T/seed/.pi/agent" "$T/baseline" "$T/project tools"
 printf '{"packages": ["seed-package"]}\n' >"$T/seed/.pi/agent/settings.json"
-printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$PATH" >"$GRAPH_PATH"' \
-	'printf "%s\n" "${PI_JAIL_PATH_PREPEND-unset}" >"$GRAPH_CARRIER"' >"$T/baseline/code-review-graph"
+printf '%s\n' '#!/bin/sh' 'touch "$GRAPH_INVOKED"' >"$T/baseline/code-review-graph"
 printf '#!/bin/sh\nprintf "%%s\\n" "$PATH" "${PI_JAIL_PATH_PREPEND-unset}" "$PROJECT_VALUE" "$@"\n' \
 	>"$T/baseline/inspect-env"
 chmod +x "$T/baseline/code-review-graph" "$T/baseline/inspect-env"
@@ -30,12 +29,13 @@ baseline="$T/baseline:/usr/bin:/bin"
 payload='$HOME/$(touch path-payload)/`touch path-backtick`'
 prefix="$T/project tools:/container/$payload:/missing container dir"
 for mode in prefix empty unset; do
+	rm -f "$T/graph-invoked"
 	mkdir -p "$T/$mode/.pi/agent"
 	printf '{"packages": ["user-package"]}\n' >"$T/$mode/.pi/agent/settings.json"
 	(
 		cd "$T"
 		export HOME="$T/$mode" HOME_SEED_DIR="$T/seed" PATH="$baseline"
-		export GRAPH_PATH="$T/graph-path" GRAPH_CARRIER="$T/graph-carrier"
+		export GRAPH_INVOKED="$T/graph-invoked"
 		export PROJECT_VALUE=' literal = "quotes" $HOME $(touch env-payload) '
 		case $mode in
 		prefix) export PI_JAIL_PATH_PREPEND="$prefix" ;;
@@ -47,8 +47,7 @@ for mode in prefix empty unset; do
 	check "$mode entrypoint executes command" "0" "$?"
 	expected_path=$baseline
 	mapfile -t actual <"$T/output"
-	check "$mode graph build runs" "building code review graph" "${actual[0]-}"
-	actual=("${actual[@]:1}")
+	check "$mode graph not invoked" "0" "$([ -e "$T/graph-invoked" ] && echo 1 || echo 0)"
 	if [ "$mode" = prefix ]; then
 		expected_path="$prefix:$baseline"
 		check "$mode command resolves from prepended directory" "project-command" "${actual[0]-}"
@@ -59,8 +58,6 @@ for mode in prefix empty unset; do
 	check "$mode env inherited literally" ' literal = "quotes" $HOME $(touch env-payload) ' "${actual[2]-}"
 	check "$mode command receives spaced argument" 'argument with spaces' "${actual[3]-}"
 	check "$mode command receives equals argument" 'equals=a=b' "${actual[4]-}"
-	check "$mode graph build sees final PATH" "$expected_path" "$(<"$T/graph-path")"
-	check "$mode graph build cannot propagate carrier" "unset" "$(<"$T/graph-carrier")"
 	check "$mode settings still seeded and merged" '["seed-package","user-package"]' \
 		"$(jq -c .packages "$T/$mode/.pi/agent/settings.json")"
 done
