@@ -84,13 +84,31 @@ or anything outside the project - except [project-wide volumes](#project-volumes
 workspace jail.
 
 The host's jj/git user config (`~/.config/jj`, `~/.gitconfig`, `~/.config/git`, whichever exist) is mounted into the
-jail read-only, so jj and git run with the usual identity, aliases and ignores inside - the jail home is per-project and
-would otherwise leave them unconfigured. Includes stored inside those dirs work; includes pointing elsewhere do not (git
-silently ignores them, jj errors out) - mount such dirs via [project-wide volumes](#project-volumes) if needed. Signing
-keys never enter the jail: if your config signs commits, shadow it with repo-local config
-(`git config --file .git/config commit.gpgsign false`, `jj config set --repo signing.behavior drop`, both set on the
-host) and sign when landing work to main on the host - keep signing last, an in-jail rewrite of a signed commit drops
-its signature.
+jail read-only, with one writable jj exception below. These mounts preserve the usual identity, aliases and ignores -
+the jail home is per-project and would otherwise leave them unconfigured. Includes stored inside those dirs work;
+includes pointing elsewhere do not (git silently ignores them, jj errors out) - mount such dirs via
+[project-wide volumes](#project-volumes) if needed. Signing keys never enter the jail: if your config signs commits,
+shadow it with repo-local config (`git config --file .git/config commit.gpgsign false`,
+`jj config set --repo signing.behavior drop`, both set on the host) and sign when landing work to main on the host -
+keep signing last, an in-jail rewrite of a signed commit drops its signature.
+
+Before `pj open`, `pj debug`, or `pj exec` starts Podman, host jj runs `jj config path --repo` from the project root.
+This initializes missing secure repo-config state: it may create the host jj config directory, a repo config ID, and
+metadata even when no `config.toml` exists. Initialization or path validation failure aborts before Podman. Config paths
+use `${XDG_CONFIG_HOME:-$HOME/.config}` on the host.
+
+The host-resolved repo-config directory is mounted at `/home/.config/jj/repos/<id>` with `rw,z`, beneath the jj parent
+mount at `/home/.config/jj` with `ro,z`. Git config mounts remain `ro,z`; the whole `jj/repos/` directory is never
+mounted writable. The returned path must name `jj/repos/<20 hex chars>/config.toml`, and its existing parent directory
+must resolve to the canonical repos root plus that same ID, not an alias to another directory. This narrow mount lets jj
+write its secure metadata and repo config. Newly created in-jail repos are unsupported: they need new config directories
+beneath the read-only parent.
+
+This is not strict repository-to-config isolation. The jail can change `.jj/repo/config-id`, and host jj may adopt a
+substituted sibling ID, including when its metadata points to a removed repo or a temporary probe fails. Host jj can
+modify sibling metadata before path validation, and a retained sibling ID selects that sibling's config directory for
+the writable mount. Config changes made in the jail affect later host jj behavior. This residual risk is accepted for
+now; stronger isolation requires a trusted host-owned association rather than trusting jail-writable state.
 
 Requires rootless podman (`--userns=keep-id` maps your uid into the container) and SELinux relabeling of the mounted
 trees (`:z`). Needs jj >= 0.46 (colocated workspaces) and git >= 2.42.

@@ -11,6 +11,7 @@ command -v jj >/dev/null 2>&1 || {
 	exit 1
 }
 
+REAL_JJ=$(command -v jj)
 pass=0
 fail=0
 
@@ -71,10 +72,11 @@ trap 'rm -rf .smoke-tmp "$X"' EXIT
 out="$T/base.out"
 mkproj "$T/base" "$out"
 ( cd "$T/base" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pj" open foo ) >/dev/null 2>&1
-check "baseline keeps 7 fixed mounts" "7" "$(vols "$out" | wc -l)"
+check "baseline includes initialized jj parent and repo mounts" "9" "$(vols "$out" | wc -l)"
 check "baseline home mount last" \
 	"$T/base/shared/home:/home:z" "$(vols "$out" | tail -1)"
-check "baseline has no vcs config mounts" "0" "$(vols "$out" | grep -cE ':(/home/.config/jj|/home/.gitconfig|/home/.config/git):ro,z$')"
+check "baseline mounts newly initialized jj config read-only" "1" \
+	"$(vols "$out" | grep -cE ':(/home/.config/jj|/home/.gitconfig|/home/.config/git):ro,z$')"
 
 # --- pj open: host VCS user config is mounted read-only -----------------------
 out="$T/vcs.out"
@@ -89,6 +91,103 @@ check "gitconfig mounted" "$T/vcs/home/.gitconfig:/home/.gitconfig:ro,z" \
 	"$(vols "$out" | grep -m1 '/home/.gitconfig:ro,z')"
 check "git config dir mounted" "$T/vcs/cfg/git:/home/.config/git:ro,z" \
 	"$(vols "$out" | grep -m1 '/home/.config/git:ro,z')"
+
+# --- repo config: real host jj initializes and selects one writable child ----
+for state in existing absent foreign; do
+	out="$T/repo-config-$state.out"
+	R="$T/repo-config-$state"
+	mkproj "$R" "$out"
+	# With ordinary metadata, host jj should keep this sibling behind the read-only parent.
+	mkrepo "$R/other"
+	other_config=$(cd "$R/other" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" "$REAL_JJ" config path --repo)
+	if [ "$state" = existing ]; then
+		config=$(cd "$R" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" "$REAL_JJ" config path --repo)
+		expected_id=$(<"$R/.jj/repo/config-id")
+		printf '[signing]\nbehavior = "drop"\n' >"$config"
+	elif [ "$state" = foreign ]; then
+		other_id=${other_config%/config.toml}
+		other_id=${other_id##*/}
+		printf '%s' "$other_id" >"$R/.jj/repo/config-id"
+	else
+		check "absent repo starts without config-id" "0" "$([ -e "$R/.jj/repo/config-id" ] && echo 1 || echo 0)"
+	fi
+	for command in open debug exec; do
+		rm -f "$out"
+		args=("$command" foo)
+		[ "$command" != exec ] || args+=(true)
+		(cd "$R/shared" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" PATH="$R/bin:$PATH" \
+			"$OLDPWD/pj" "${args[@]}") >"$R/stdout" 2>"$R/stderr"
+		check "$state $command succeeds" "0" "$?"
+		id=$([ ! -f "$R/.jj/repo/config-id" ] || printf '%s' "$(<"$R/.jj/repo/config-id")")
+		check "$state $command initializes valid config-id" "1" \
+			"$([[ "$id" =~ ^[0-9a-f]{20}$ ]] && echo 1 || echo 0)"
+		check "$state $command has repo metadata" "1" \
+			"$([ -f "$R/cfg/jj/repos/$id/metadata.binpb" ] && echo 1 || echo 0)"
+		check "$state $command mounts jj parent read-only" "$R/cfg/jj:/home/.config/jj:ro,z" \
+			"$(vols "$out" | grep -F ':/home/.config/jj:ro,z')"
+		check "$state $command mounts only host-resolved repo-config directory writable" \
+			"$R/cfg/jj/repos/$id:/home/.config/jj/repos/$id:rw,z" \
+			"$(vols "$out" | grep ':rw,z$')"
+		check "$state $command never mounts all repos writable" "0" \
+			"$(vols "$out" | grep -cF ':/home/.config/jj/repos:rw,z')"
+		check "$state $command does not mount other repo writable" "0" \
+			"$(vols "$out" | grep -Fc "${other_config%/config.toml}:/home/.config/jj/repos/")"
+	done
+	case "$state" in
+	existing) check "launches preserve existing config-id" "$expected_id" "$id" ;;
+	foreign)
+		check "host jj repairs foreign config-id with ordinary writable metadata" "1" \
+			"$([ "$id" != "$other_id" ] && echo 1 || echo 0)"
+		;;
+	absent)
+		check "launches need no actual repo config file" "0" \
+			"$([ -e "$R/cfg/jj/repos/$id/config.toml" ] && echo 1 || echo 0)"
+		;;
+	esac
+done
+
+# Selectively intercept path lookup; all root/sparse handling still uses real jj.
+R="$T/repo-config-invalid"
+out="$T/repo-config-invalid.out"
+mkproj "$R" "$out"
+{
+	printf '#!/bin/bash\nREAL_JJ=%q\n' "$REAL_JJ"
+	cat <<'JJ_WRAPPER'
+if [ "$*" = "config path --repo" ]; then
+	printf '%s\n' "$PWD" >"$TEST_JJ_CWD"
+	[ "$TEST_JJ_MODE" != failure ] || exit 42
+	printf '%s\n' "$TEST_JJ_PATH"
+else
+	exec "$REAL_JJ" "$@"
+fi
+JJ_WRAPPER
+} >"$R/bin/jj"
+chmod +x "$R/bin/jj"
+id=0123456789abcdef0123
+mkdir -p "$R/cfg/jj/repos" "$R/outside/$id" "$R/cfg/jj/repos-escape/$id"
+ln -s "$R/cfg/jj/repos-escape/$id" "$R/cfg/jj/repos/$id"
+mkdir -p "$R/cfg/jj/repos/33333333333333333333"
+ln -s "$R/cfg/jj/repos/33333333333333333333" "$R/cfg/jj/repos/22222222222222222222"
+for mode in failure empty malformed outside missing nested traversal symlink alias; do
+	case "$mode" in
+	failure|empty) config= ;;
+	malformed) config="$R/cfg/jj/repos/not-an-id/config.toml" ;;
+	outside) config="$R/outside/$id/config.toml" ;;
+	missing) config="$R/cfg/jj/repos/11111111111111111111/config.toml" ;;
+	nested) config="$R/cfg/jj/repos/$id/extra/config.toml" ;;
+	traversal) config="$R/cfg/jj/repos/$id/../$id/config.toml" ;;
+	symlink) config="$R/cfg/jj/repos/$id/config.toml" ;;
+	alias) config="$R/cfg/jj/repos/22222222222222222222/config.toml" ;;
+	esac
+	rm -f "$out" "$R/lookup-cwd"
+	(cd "$R/shared" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" PATH="$R/bin:$PATH" \
+		TEST_JJ_MODE="$mode" TEST_JJ_PATH="$config" TEST_JJ_CWD="$R/lookup-cwd" \
+		"$OLDPWD/pj" open foo) >"$R/stdout" 2>"$R/stderr"
+	check "$mode repo path fails" "1" "$?"
+	check "$mode repo path never starts Podman" "0" "$([ -e "$out" ] && echo 1 || echo 0)"
+	check "$mode lookup runs at project root" "$R" \
+		"$([ ! -f "$R/lookup-cwd" ] || printf '%s' "$(<"$R/lookup-cwd")")"
+done
 
 # --- pj open: volumes from pi-jail.conf --------------------------------------
 out="$T/vols.out"
@@ -105,9 +204,9 @@ $T/vols/shared/home:/home
 KEEP=value
 EOF
 ( cd "$T/vols" && HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/cfg" PATH="$PWD/bin:$PATH" "$OLDPWD/pj" open foo ) >"$T/vols/stdout" 2>&1
-check "3 extra mounts appended" "10" "$(vols "$out" | wc -l)"
+check "3 extra mounts appended" "12" "$(vols "$out" | wc -l)"
 check "extra mount after fixed ones" \
-	"$T/vols/shared/project:/work/shared/project" "$(vols "$out" | sed -n '8p')"
+	"$T/vols/shared/project:/work/shared/project" "$(vols "$out" | head -10 | tail -1)"
 check "env section not mounted" "0" "$(vols "$out" | grep -c 'KEEP=value')"
 check "shadowing mount allowed" "1" "$(vols "$out" | grep -c ':/home$')"
 check "startup line lists mounts" "1" \
@@ -532,7 +631,8 @@ PROJECT_TOKEN=host-owned
 	for f in models.json mcp.json settings.json; do : >"$R/cfg/pi-jail/$f"; done
 	(cd "$R" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" PATH="$T:$PATH" "$P" open task1) >/dev/null 2>&1
 	check "open succeeds on a narrowed workspace" "0" "$?"
-	check "open heals the sparse pattern" "." "$(cd "$R/ws/task1" && jj sparse list)"
+	check "open heals the sparse pattern" "." \
+		"$(cd "$R/ws/task1" && HOME="$R/home" XDG_CONFIG_HOME="$R/cfg" jj sparse list)"
 	check "open rematerializes the files" "1" \
 		"$([ -f "$R/ws/task1/base" ] && echo 1 || echo 0)"
 fi

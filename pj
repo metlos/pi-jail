@@ -592,6 +592,28 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 		extra_vols+=("-v" "$line")
 	done < <(section_lines volumes)
 
+	# Initialize and select the host-resolved repo-config directory.
+	# shortcut: host jj may adopt a substituted config ID; pin association if stronger isolation is required.
+	local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+	local repo_config repo_dir repo_id repos_root repo_source
+	repo_config=$(jj config path --repo) || {
+		echo "pj: cannot initialize jj repo config" >&2
+		exit 1
+	}
+	repo_dir=${repo_config%/config.toml}
+	repo_id=${repo_dir##*/}
+	if [[ "$repo_config" != "$xdg/jj/repos/$repo_id/config.toml" ||
+		! "$repo_id" =~ ^[0-9a-fA-F]{20}$ || ! -d "$repo_dir" ]]; then
+		echo "pj: invalid jj repo config path: $repo_config" >&2
+		exit 1
+	fi
+	repos_root=$(cd -- "$xdg/jj/repos" && pwd -P)
+	repo_source=$(cd -- "$repo_dir" && pwd -P)
+	if [[ "$repo_source" != "$repos_root/$repo_id" ]]; then
+		echo "pj: jj repo config directory is not $repos_root/$repo_id: $repo_dir" >&2
+		exit 1
+	fi
+
 	# host VCS user config, read-only: the jail home is per-project, so without
 	# this jj/git run unconfigured inside (no identity, no aliases, no ignores).
 	# The whole config dirs, not single files, so includes/ inside them work.
@@ -600,11 +622,13 @@ run_jail() { # run_jail NAME CMD [ARGS...]
 	# out: shadow with repo-local config (git commit.gpgsign, jj signing.behavior)
 	# and sign on the host when merging to main.
 	declare -a vcs_vols=()
-	local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
 	local spec
 	for spec in "$xdg/jj:/home/.config/jj" "$HOME/.gitconfig:/home/.gitconfig" "$xdg/git:/home/.config/git"; do
 		if [ -e "${spec%%:*}" ]; then vcs_vols+=("-v" "$spec:ro,z"); fi
 	done
+
+	# Only the host-resolved repo-config directory is writable beneath the read-only parent.
+	vcs_vols+=("-v" "$repo_source:/home/.config/jj/repos/$repo_id:rw,z")
 
 	# settings are seeded per project (first run only): pi writes them inside the
 	# jail (defaultModel, theme), so changes stay in this project instead of
