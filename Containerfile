@@ -19,6 +19,7 @@ RUN dnf update -y \
   python3 \
   python3-pip \
   npm \
+  @development-tools \
   && dnf clean all
 
 # jj
